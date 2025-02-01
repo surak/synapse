@@ -104,6 +104,12 @@ func (c *Client) handleRequests() {
 	}
 }
 
+func (c *Client) writeJSON(v any) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.WriteJSON(v)
+}
+
 func (c *Client) forwardRequest(req types.ForwardRequest) {
 	var upstreamURL string
 	if req.Query == "" {
@@ -121,7 +127,9 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 			Body:       []byte(fmt.Sprintf("Error: %v", err)),
 			Type:       types.TypeNormal,
 		}
-		c.conn.WriteJSON(errResp)
+		if err := c.writeJSON(errResp); err != nil {
+			log.Printf("发送错误响应失败: %v", err)
+		}
 		return
 	}
 
@@ -143,7 +151,7 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 			Body:       []byte(fmt.Sprintf("Error: %v", err)),
 			Type:       types.TypeNormal,
 		}
-		if err := c.conn.WriteJSON(errResp); err != nil {
+		if err := c.writeJSON(errResp); err != nil {
 			log.Printf("发送错误响应失败: %v", err)
 		}
 		return
@@ -162,7 +170,7 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 				Body:       []byte(fmt.Sprintf("Error: %v", err)),
 				Type:       types.TypeNormal,
 			}
-			if err := c.conn.WriteJSON(errResp); err != nil {
+			if err := c.writeJSON(errResp); err != nil {
 				log.Printf("发送错误响应失败: %v", err)
 			}
 			return
@@ -177,15 +185,10 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 			Type:       types.TypeNormal,
 		}
 
-		// 在发送响应之前添加互斥锁
-		var writeMu sync.Mutex
-		writeMu.Lock()
-		if err := c.conn.WriteJSON(forwardResp); err != nil {
+		if err := c.writeJSON(forwardResp); err != nil {
 			log.Printf("发送响应失败: %v", err)
-			writeMu.Unlock()
 			return
 		}
-		writeMu.Unlock()
 	}
 }
 
@@ -206,7 +209,7 @@ func (c *Client) handleStreamResponse(reader io.ReadCloser, requestID string) {
 					Done:       true,
 					StatusCode: http.StatusOK,
 				}
-				if err := c.conn.WriteJSON(doneResp); err != nil {
+				if err := c.writeJSON(doneResp); err != nil {
 					log.Printf("发送流结束标记失败: %v", err)
 				}
 				return
@@ -223,7 +226,7 @@ func (c *Client) handleStreamResponse(reader io.ReadCloser, requestID string) {
 					StatusCode: http.StatusOK,
 					Body:       buffer.Bytes(),
 				}
-				if err := c.conn.WriteJSON(chunk); err != nil {
+				if err := c.writeJSON(chunk); err != nil {
 					log.Printf("发送流数据块失败: %v", err)
 					return
 				}

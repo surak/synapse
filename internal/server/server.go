@@ -28,6 +28,13 @@ type Server struct {
 type Client struct {
 	conn   *websocket.Conn
 	models []types.ModelInfo
+	mu     sync.Mutex
+}
+
+func (c *Client) writeJSON(v any) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.WriteJSON(v)
 }
 
 func NewServer() *Server {
@@ -201,7 +208,7 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 	client := s.clients[clientID]
 	s.mu.RUnlock()
 
-	if err := client.conn.WriteJSON(req); err != nil {
+	if err := client.writeJSON(req); err != nil {
 		s.reqMu.Lock()
 		delete(s.pendingRequests, requestID)
 		close(respChan)
