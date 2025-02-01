@@ -164,6 +164,8 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 		Data:   models,
 	}
 
+	// 设置正确的Content-Type头
+	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
 
