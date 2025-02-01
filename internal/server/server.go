@@ -5,6 +5,7 @@ import (
 	cryptoRand "crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"math/rand"
@@ -84,6 +85,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleClientResponses(clientID string, conn *websocket.Conn) {
 	for {
 		var resp types.ForwardResponse
+
 		if err := conn.ReadJSON(&resp); err != nil {
 			log.Printf("读取客户端 %s 响应失败: %v", clientID, err)
 			return
@@ -94,13 +96,25 @@ func (s *Server) handleClientResponses(clientID string, conn *websocket.Conn) {
 		s.reqMu.RUnlock()
 
 		if exists {
+			// 处理流式结束标记
+			if resp.Done {
+				close(respChan)
+				s.reqMu.Lock()
+				delete(s.pendingRequests, resp.RequestID)
+				s.reqMu.Unlock()
+				continue
+			}
+
+			// 发送响应数据
 			respChan <- resp
-			s.reqMu.Lock()
-			delete(s.pendingRequests, resp.RequestID)
-			close(respChan)
-			s.reqMu.Unlock()
-		} else {
-			log.Printf("收到未知请求ID的响应: %s", resp.RequestID)
+
+			// 普通响应需要关闭通道
+			if resp.Type == types.TypeNormal {
+				s.reqMu.Lock()
+				delete(s.pendingRequests, resp.RequestID)
+				close(respChan)
+				s.reqMu.Unlock()
+			}
 		}
 	}
 }
@@ -204,17 +218,39 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 	// 等待响应
 	select {
 	case resp := <-respChan:
-		// 设置响应头
+		log.Printf("收到响应: %+v", resp)
 		for k, values := range resp.Header {
 			for _, v := range values {
 				w.Header().Add(k, v)
 			}
 		}
-		w.WriteHeader(resp.StatusCode)
-		w.Write(resp.Body)
+		if resp.Type == types.TypeNormal {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(resp.StatusCode)
+			w.Write(resp.Body)
+		} else {
+			// 流式响应
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Header().Set("Cache-Control", "no-cache")
+			w.Header().Set("Connection", "keep-alive")
+			flusher, _ := w.(http.Flusher)
 
+			// 写入第一个chunk
+			fmt.Fprintf(w, "data: %s\n\n", resp.Body)
+			flusher.Flush()
+
+			// 继续处理后续chunks
+			for {
+				select {
+				case chunk := <-respChan:
+					fmt.Fprintf(w, "data: %s\n\n", chunk.Body)
+					flusher.Flush()
+				case <-r.Context().Done():
+					return
+				}
+			}
+		}
 	case <-r.Context().Done():
-		// 请求被取消
 		s.reqMu.Lock()
 		delete(s.pendingRequests, requestID)
 		close(respChan)

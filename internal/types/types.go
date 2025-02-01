@@ -35,10 +35,24 @@ type ForwardRequest struct {
 	Body      []byte      `json:"body"`
 }
 
-// Add this new type for forwarded responses
+// ResponseType 表示响应类型
+const (
+	TypeNormal = 0 // 普通响应
+	TypeStream = 1 // 流式响应
+)
+
 type ForwardResponse struct {
 	RequestID  string      `json:"request_id"`
 	StatusCode int         `json:"status_code"`
 	Header     http.Header `json:"header"`
 	Body       []byte      `json:"body"`
+	Type       int         `json:"type"` // TypeNormal 或 TypeStream
+	Done       bool        `json:"done"` // 用于流式结束标记
+}
+
+// 在ForwardResponse结构体后添加
+type StreamChunk struct {
+	RequestID string `json:"request_id"`
+	Data      []byte `json:"data"`
+	Done      bool   `json:"done"`
 }

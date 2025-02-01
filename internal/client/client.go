@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"bufio"
+
 	"github.com/gorilla/websocket"
 	"github.com/zeyugao/synapse/internal/types"
 )
@@ -155,7 +157,7 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 
 	if mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err == nil && mediaType == "text/event-stream" {
 		log.Printf("处理流式响应")
-		c.handleStreamResponse(resp.Body)
+		go c.handleStreamResponse(resp.Body, req.RequestID)
 	} else {
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
@@ -179,6 +181,7 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 			StatusCode: resp.StatusCode,
 			Header:     resp.Header,
 			Body:       body,
+			Type:       types.TypeNormal,
 		}
 
 		// 在发送响应之前添加互斥锁
@@ -194,20 +197,46 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 	}
 }
 
-func (c *Client) handleStreamResponse(reader io.Reader) {
-	buf := make([]byte, 4096)
-	for {
-		n, err := reader.Read(buf)
-		if err != nil {
-			if err != io.EOF {
-				log.Printf("读取流数据错误: %v", err)
-			}
-			return
-		}
-		if n > 0 {
-			if err := c.conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
-				log.Printf("发送流数据失败: %v", err)
+func (c *Client) handleStreamResponse(reader io.Reader, requestID string) {
+	scanner := bufio.NewScanner(reader)
+	var buffer bytes.Buffer
+
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if bytes.HasPrefix(line, []byte("data: ")) {
+			content := bytes.TrimSpace(line[6:])
+			if bytes.Equal(content, []byte("[DONE]")) {
+				// 发送流结束标记
+				doneResp := types.ForwardResponse{
+					RequestID:  requestID,
+					Type:       types.TypeStream,
+					Done:       true,
+					StatusCode: http.StatusOK,
+				}
+				if err := c.conn.WriteJSON(doneResp); err != nil {
+					log.Printf("发送流结束标记失败: %v", err)
+				}
 				return
+			}
+
+			buffer.Write(content)
+			buffer.WriteByte('\n')
+
+			// 当遇到空行时发送一个数据块
+			if len(line) == 0 {
+				if buffer.Len() > 0 {
+					chunk := types.ForwardResponse{
+						RequestID:  requestID,
+						Type:       types.TypeStream,
+						StatusCode: http.StatusOK,
+						Body:       buffer.Bytes(),
+					}
+					if err := c.conn.WriteJSON(chunk); err != nil {
+						log.Printf("发送流数据块失败: %v", err)
+						return
+					}
+					buffer.Reset()
+				}
 			}
 		}
 	}
