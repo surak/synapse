@@ -93,14 +93,22 @@ func (c *Client) handleRequests() {
 }
 
 func (c *Client) forwardRequest(req types.ForwardRequest) {
-	upstreamURL := fmt.Sprintf("http://%s:%s%s", c.UpstreamHost, c.UpstreamPort, req.Path)
+	// 构建完整的上游请求URL
+	upstreamURL := fmt.Sprintf("http://%s:%s%s?%s", 
+		c.UpstreamHost, 
+		c.UpstreamPort, 
+		req.Path, 
+		req.Query)
 
 	// 创建请求
-	httpReq, err := http.NewRequest("POST", upstreamURL, bytes.NewReader(req.Body))
+	httpReq, err := http.NewRequest(req.Method, upstreamURL, bytes.NewReader(req.Body))
 	if err != nil {
 		c.conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("Error: %v", err)))
 		return
 	}
+
+	// 复制请求头
+	httpReq.Header = req.Header
 
 	// 发送请求
 	resp, err := http.DefaultClient.Do(httpReq)

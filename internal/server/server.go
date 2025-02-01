@@ -1,7 +1,9 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
+	"io"
 	"math/rand"
 	"net/http"
 	"sync"
@@ -89,7 +91,7 @@ func (s *Server) handleClientDisconnect(clientID string, conn *websocket.Conn) {
 	}
 }
 
-func (s *Server) handleModels(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -120,10 +122,31 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req types.ForwardRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+	// 读取并保留原始请求体
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Error reading request body", http.StatusBadRequest)
 		return
+	}
+	r.Body = io.NopCloser(bytes.NewBuffer(body)) // 重置body供后续使用
+
+	// 从请求体解析model字段
+	var modelReq struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &modelReq); err != nil {
+		http.Error(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+
+	// 构建转发请求
+	req := types.ForwardRequest{
+		Model:  modelReq.Model,
+		Method: r.Method,
+		Path:   r.URL.Path,
+		Query:  r.URL.RawQuery,
+		Header: r.Header.Clone(),
+		Body:   body,
 	}
 
 	s.mu.RLock()

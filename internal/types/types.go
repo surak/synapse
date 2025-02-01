@@ -1,6 +1,9 @@
 package types
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"net/http"
+)
 
 // ModelInfo 存储模型信息
 type ModelInfo struct {
@@ -24,7 +27,10 @@ type ClientRegistration struct {
 
 // ForwardRequest 转发请求的结构
 type ForwardRequest struct {
-	Model string          `json:"model"`
-	Path  string          `json:"path"`
-	Body  json.RawMessage `json:"body"`
+	Model  string          `json:"model"`
+	Method string          `json:"method"`
+	Path   string          `json:"path"`
+	Query  string          `json:"query"`
+	Header http.Header     `json:"header"`
+	Body   json.RawMessage `json:"body"`
 }
