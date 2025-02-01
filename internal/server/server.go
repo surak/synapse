@@ -2,8 +2,11 @@ package server
 
 import (
 	"bytes"
+	cryptoRand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"io"
+	"log"
 	"math/rand"
 	"net/http"
 	"sync"
@@ -13,10 +16,12 @@ import (
 )
 
 type Server struct {
-	clients      map[string]*Client
-	modelClients map[string][]string // model -> []clientID
-	mu           sync.RWMutex
-	upgrader     websocket.Upgrader
+	clients         map[string]*Client
+	modelClients    map[string][]string // model -> []clientID
+	mu              sync.RWMutex
+	upgrader        websocket.Upgrader
+	pendingRequests map[string]chan types.ForwardResponse
+	reqMu           sync.RWMutex
 }
 
 type Client struct {
@@ -26,8 +31,9 @@ type Client struct {
 
 func NewServer() *Server {
 	return &Server{
-		clients:      make(map[string]*Client),
-		modelClients: make(map[string][]string),
+		clients:         make(map[string]*Client),
+		modelClients:    make(map[string][]string),
+		pendingRequests: make(map[string]chan types.ForwardResponse),
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
@@ -36,9 +42,16 @@ func NewServer() *Server {
 	}
 }
 
+func generateRequestID() string {
+	b := make([]byte, 16)
+	cryptoRand.Read(b)
+	return hex.EncodeToString(b)
+}
+
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
+		log.Printf("WebSocket升级失败: %v", err)
 		http.Error(w, "Could not upgrade connection", http.StatusInternalServerError)
 		return
 	}
@@ -46,9 +59,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	// 等待客户端注册信息
 	var registration types.ClientRegistration
 	if err := conn.ReadJSON(&registration); err != nil {
+		log.Printf("读取注册信息失败: %v", err)
 		conn.Close()
 		return
 	}
+	log.Printf("新客户端连接: %s, 注册模型数: %d", registration.ClientID, len(registration.Models))
 
 	s.mu.Lock()
 	s.clients[registration.ClientID] = &Client{
@@ -62,31 +77,30 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 
-	// 保持连接并处理断开
-	go s.handleClientDisconnect(registration.ClientID, conn)
+	// 添加处理响应的 goroutine
+	go s.handleClientResponses(registration.ClientID, conn)
 }
 
-func (s *Server) handleClientDisconnect(clientID string, conn *websocket.Conn) {
+func (s *Server) handleClientResponses(clientID string, conn *websocket.Conn) {
 	for {
-		if _, _, err := conn.ReadMessage(); err != nil {
-			s.mu.Lock()
-			delete(s.clients, clientID)
-			// 清理模型映射
-			for model, clients := range s.modelClients {
-				newClients := make([]string, 0)
-				for _, cid := range clients {
-					if cid != clientID {
-						newClients = append(newClients, cid)
-					}
-				}
-				if len(newClients) == 0 {
-					delete(s.modelClients, model)
-				} else {
-					s.modelClients[model] = newClients
-				}
-			}
-			s.mu.Unlock()
+		var resp types.ForwardResponse
+		if err := conn.ReadJSON(&resp); err != nil {
+			log.Printf("读取客户端 %s 响应失败: %v", clientID, err)
 			return
+		}
+
+		s.reqMu.RLock()
+		respChan, exists := s.pendingRequests[resp.RequestID]
+		s.reqMu.RUnlock()
+
+		if exists {
+			respChan <- resp
+			s.reqMu.Lock()
+			delete(s.pendingRequests, resp.RequestID)
+			close(respChan)
+			s.reqMu.Unlock()
+		} else {
+			log.Printf("收到未知请求ID的响应: %s", resp.RequestID)
 		}
 	}
 }
@@ -122,15 +136,14 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 读取并保留原始请求体
+	// 读取请求体
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Error reading request body", http.StatusBadRequest)
 		return
 	}
-	r.Body = io.NopCloser(bytes.NewBuffer(body)) // 重置body供后续使用
+	r.Body = io.NopCloser(bytes.NewBuffer(body))
 
-	// 从请求体解析model字段
 	var modelReq struct {
 		Model string `json:"model"`
 	}
@@ -139,16 +152,27 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// 生成请求ID
+	requestID := generateRequestID()
+
+	// 创建响应通道
+	respChan := make(chan types.ForwardResponse, 1)
+	s.reqMu.Lock()
+	s.pendingRequests[requestID] = respChan
+	s.reqMu.Unlock()
+
 	// 构建转发请求
 	req := types.ForwardRequest{
-		Model:  modelReq.Model,
-		Method: r.Method,
-		Path:   r.URL.Path,
-		Query:  r.URL.RawQuery,
-		Header: r.Header.Clone(),
-		Body:   body,
+		RequestID: requestID,
+		Model:     modelReq.Model,
+		Method:    r.Method,
+		Path:      r.URL.Path,
+		Query:     r.URL.RawQuery,
+		Header:    r.Header.Clone(),
+		Body:      body,
 	}
 
+	// 选择客户端并发送请求
 	s.mu.RLock()
 	clients := s.modelClients[req.Model]
 	if len(clients) == 0 {
@@ -156,41 +180,38 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Model not found", http.StatusNotFound)
 		return
 	}
-
-	// 随机选择一个客户端
 	clientID := clients[rand.Intn(len(clients))]
 	client := s.clients[clientID]
 	s.mu.RUnlock()
 
-	// 使用 WebSocket 转发请求
 	if err := client.conn.WriteJSON(req); err != nil {
+		s.reqMu.Lock()
+		delete(s.pendingRequests, requestID)
+		close(respChan)
+		s.reqMu.Unlock()
 		http.Error(w, "Failed to forward request", http.StatusInternalServerError)
 		return
 	}
 
-	// 创建用于转发响应的 WebSocket 连接
-	upgrader := websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			return true
-		},
-	}
+	// 等待响应
+	select {
+	case resp := <-respChan:
+		// 设置响应头
+		for k, values := range resp.Header {
+			for _, v := range values {
+				w.Header().Add(k, v)
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		w.Write(resp.Body)
 
-	conn, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		http.Error(w, "Could not upgrade connection", http.StatusInternalServerError)
+	case <-r.Context().Done():
+		// 请求被取消
+		s.reqMu.Lock()
+		delete(s.pendingRequests, requestID)
+		close(respChan)
+		s.reqMu.Unlock()
 		return
-	}
-	defer conn.Close()
-
-	// 转发响应
-	for {
-		messageType, message, err := client.conn.ReadMessage()
-		if err != nil {
-			break
-		}
-		if err := conn.WriteMessage(messageType, message); err != nil {
-			break
-		}
 	}
 }
 

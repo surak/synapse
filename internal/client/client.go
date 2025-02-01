@@ -1,82 +1,83 @@
 package client
 
 import (
-	"bufio"
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
+	"sync"
 
 	"github.com/gorilla/websocket"
 	"github.com/zeyugao/synapse/internal/types"
 )
 
 type Client struct {
-	UpstreamHost string
-	UpstreamPort string
-	ServerHost   string
-	ServerPort   string
-	ClientID     string
-	models       []types.ModelInfo
-	conn         *websocket.Conn
+	Upstream   string
+	ServerHost string
+	ServerPort string
+	ClientID   string
+	models     []types.ModelInfo
+	conn       *websocket.Conn
 }
 
-func NewClient(upstreamHost, upstreamPort, serverHost, serverPort string) *Client {
+func NewClient(upstream, serverHost, serverPort string) *Client {
 	return &Client{
-		UpstreamHost: upstreamHost,
-		UpstreamPort: upstreamPort,
-		ServerHost:   serverHost,
-		ServerPort:   serverPort,
-		ClientID:     generateClientID(), // 实现一个生成唯一ID的函数
+		Upstream:   upstream,
+		ServerHost: serverHost,
+		ServerPort: serverPort,
+		ClientID:   generateClientID(), // 实现一个生成唯一ID的函数
 	}
 }
 
 func (c *Client) fetchModels() error {
-	resp, err := http.Get(fmt.Sprintf("http://%s:%s/v1/models", c.UpstreamHost, c.UpstreamPort))
+	resp, err := http.Get(fmt.Sprintf("%s/v1/models", c.Upstream))
 	if err != nil {
+		log.Printf("获取模型列表失败: %v", err)
 		return err
 	}
 	defer resp.Body.Close()
 
 	var modelsResp types.ModelsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&modelsResp); err != nil {
+		log.Printf("解析模型响应失败: %v", err)
 		return err
 	}
-
+	log.Printf("获取到 %d 个模型", len(modelsResp.Data))
 	c.models = modelsResp.Data
 	return nil
 }
 
 func (c *Client) Connect() error {
-	// 获取模型列表
 	if err := c.fetchModels(); err != nil {
+		log.Printf("初始化模型获取失败: %v", err)
 		return err
 	}
 
-	// 连接到服务器
 	wsURL := fmt.Sprintf("ws://%s:%s/ws", c.ServerHost, c.ServerPort)
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
+		log.Printf("连接服务器失败: %v", err)
 		return err
 	}
 	c.conn = conn
+	log.Printf("成功连接到服务器 %s", wsURL)
 
-	// 发送注册信息
 	registration := types.ClientRegistration{
 		ClientID: c.ClientID,
 		Models:   c.models,
 	}
 	if err := conn.WriteJSON(registration); err != nil {
+		log.Printf("发送注册信息失败: %v", err)
 		conn.Close()
 		return err
 	}
+	log.Printf("已发送客户端注册信息，ID: %s", c.ClientID)
 
-	// 处理请求
 	go c.handleRequests()
-
 	return nil
 }
 
@@ -84,68 +85,130 @@ func (c *Client) handleRequests() {
 	for {
 		var req types.ForwardRequest
 		if err := c.conn.ReadJSON(&req); err != nil {
+			log.Printf("读取请求失败: %v", err)
 			return
 		}
-
-		// 转发请求到上游服务器
+		log.Printf("收到转发请求 - 模型: %s, 路径: %s", req.Model, req.Path)
 		go c.forwardRequest(req)
 	}
 }
 
 func (c *Client) forwardRequest(req types.ForwardRequest) {
-	// 构建完整的上游请求URL
-	upstreamURL := fmt.Sprintf("http://%s:%s%s?%s", 
-		c.UpstreamHost, 
-		c.UpstreamPort, 
-		req.Path, 
-		req.Query)
+	log.Printf("开始处理请求 - 模型: %s, 路径: %s", req.Model, req.Path)
+	defer log.Printf("完成处理请求 - 模型: %s, 路径: %s", req.Model, req.Path)
 
-	// 创建请求
+	var upstreamURL string
+	if req.Query == "" {
+		upstreamURL = fmt.Sprintf("%s%s", c.Upstream, req.Path)
+	} else {
+		upstreamURL = fmt.Sprintf("%s%s?%s", c.Upstream, req.Path, req.Query)
+	}
+	log.Printf("转发请求到上游: %s %s", req.Method, upstreamURL)
+	log.Printf("请求内容: %s", string(req.Body))
+
 	httpReq, err := http.NewRequest(req.Method, upstreamURL, bytes.NewReader(req.Body))
 	if err != nil {
-		c.conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("Error: %v", err)))
+		log.Printf("创建上游请求失败: %v", err)
+		errResp := types.ForwardResponse{
+			RequestID:  req.RequestID,
+			StatusCode: http.StatusInternalServerError,
+			Body:       []byte(fmt.Sprintf("Error: %v", err)),
+		}
+		c.conn.WriteJSON(errResp)
 		return
 	}
 
-	// 复制请求头
-	httpReq.Header = req.Header
+	// 设置请求头
+	for k, v := range req.Header {
+		httpReq.Header[k] = v
+	}
+	// 确保设置了 Content-Type
+	if httpReq.Header.Get("Content-Type") == "" {
+		httpReq.Header.Set("Content-Type", "application/json")
+	}
 
-	// 发送请求
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
-		c.conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("Error: %v", err)))
+		log.Printf("上游请求执行失败: %v", err)
+		errResp := types.ForwardResponse{
+			RequestID:  req.RequestID,
+			StatusCode: http.StatusInternalServerError,
+			Body:       []byte(fmt.Sprintf("Error: %v", err)),
+		}
+		if err := c.conn.WriteJSON(errResp); err != nil {
+			log.Printf("发送错误响应失败: %v", err)
+		}
 		return
 	}
 	defer resp.Body.Close()
+	log.Printf("上游响应状态码: %d", resp.StatusCode)
+	log.Printf("上游响应头: %+v", resp.Header)
 
-	// 检查是否是流式响应
 	if resp.Header.Get("Content-Type") == "text/event-stream" {
+		log.Printf("处理流式响应")
 		c.handleStreamResponse(resp.Body)
 	} else {
-		// 非流式响应
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			c.conn.WriteMessage(websocket.TextMessage, []byte(fmt.Sprintf("Error: %v", err)))
+			log.Printf("读取响应体失败: %v", err)
+			errResp := types.ForwardResponse{
+				RequestID:  req.RequestID,
+				StatusCode: http.StatusInternalServerError,
+				Body:       []byte(fmt.Sprintf("Error: %v", err)),
+			}
+			if err := c.conn.WriteJSON(errResp); err != nil {
+				log.Printf("发送错误响应失败: %v", err)
+			}
 			return
 		}
-		c.conn.WriteMessage(websocket.TextMessage, body)
+		log.Printf("收到非流式响应，长度: %d bytes", len(body))
+		log.Printf("响应内容: %s", string(body))
+
+		// 创建转发响应结构
+		forwardResp := types.ForwardResponse{
+			RequestID:  req.RequestID,
+			StatusCode: resp.StatusCode,
+			Header:     resp.Header,
+			Body:       body,
+		}
+
+		// 在发送响应之前添加互斥锁
+		var writeMu sync.Mutex
+		writeMu.Lock()
+		if err := c.conn.WriteJSON(forwardResp); err != nil {
+			log.Printf("发送响应失败: %v", err)
+			writeMu.Unlock()
+			return
+		}
+		log.Printf("响应已发送")
+		writeMu.Unlock()
 	}
 }
 
 func (c *Client) handleStreamResponse(reader io.Reader) {
-	scanner := bufio.NewScanner(reader)
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			continue
+	buf := make([]byte, 4096)
+	for {
+		n, err := reader.Read(buf)
+		if err != nil {
+			if err != io.EOF {
+				log.Printf("读取流数据错误: %v", err)
+			}
+			return
 		}
-		// 发送每一行数据
-		c.conn.WriteMessage(websocket.TextMessage, []byte(line))
+		if n > 0 {
+			if err := c.conn.WriteMessage(websocket.BinaryMessage, buf[:n]); err != nil {
+				log.Printf("发送流数据失败: %v", err)
+				return
+			}
+		}
 	}
 }
 
 func generateClientID() string {
 	b := make([]byte, 8)
-	rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		log.Printf("生成客户端ID失败: %v", err)
+		return "fallback-id"
+	}
 	return hex.EncodeToString(b)
 }

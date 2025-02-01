@@ -8,13 +8,12 @@ import (
 )
 
 func main() {
-	upstreamHost := flag.String("upstream-host", "localhost", "Upstream host")
-	upstreamPort := flag.String("upstream-port", "8081", "Upstream port")
+	upstream := flag.String("upstream", "http://localhost:8081", "Upstream host")
 	serverHost := flag.String("server-host", "localhost", "Server host")
 	serverPort := flag.String("server-port", "8080", "Server port")
 	flag.Parse()
 
-	client := client.NewClient(*upstreamHost, *upstreamPort, *serverHost, *serverPort)
+	client := client.NewClient(*upstream, *serverHost, *serverPort)
 	log.Printf("Connecting to server at %s:%s", *serverHost, *serverPort)
 	if err := client.Connect(); err != nil {
 		log.Fatal(err)

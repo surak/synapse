@@ -1,7 +1,6 @@
 package types
 
 import (
-	"encoding/json"
 	"net/http"
 )
 
@@ -10,7 +9,7 @@ type ModelInfo struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
 	Created int64  `json:"created"`
-	Owned   bool   `json:"owned_by"`
+	Owned   string `json:"owned_by"`
 }
 
 // ModelsResponse 上游API返回的模型列表
@@ -27,10 +26,19 @@ type ClientRegistration struct {
 
 // ForwardRequest 转发请求的结构
 type ForwardRequest struct {
-	Model  string          `json:"model"`
-	Method string          `json:"method"`
-	Path   string          `json:"path"`
-	Query  string          `json:"query"`
-	Header http.Header     `json:"header"`
-	Body   json.RawMessage `json:"body"`
+	RequestID string      `json:"request_id"`
+	Model     string      `json:"model"`
+	Method    string      `json:"method"`
+	Path      string      `json:"path"`
+	Query     string      `json:"query"`
+	Header    http.Header `json:"header"`
+	Body      []byte      `json:"body"`
+}
+
+// Add this new type for forwarded responses
+type ForwardResponse struct {
+	RequestID  string      `json:"request_id"`
+	StatusCode int         `json:"status_code"`
+	Header     http.Header `json:"header"`
+	Body       []byte      `json:"body"`
 }
