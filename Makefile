@@ -9,4 +9,6 @@ clean:
 
 docker:
 	docker build -t registry.vul337.team:5005/gzy/synapse:latest .
+	docker tag registry.vul337.team:5005/gzy/synapse:latest registry.vul337.team:5005/ops/devcontainer/synapse:latest
 	docker push registry.vul337.team:5005/gzy/synapse:latest
+	docker push registry.vul337.team:5005/ops/devcontainer/synapse:latest
