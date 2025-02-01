@@ -83,12 +83,18 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleClientResponses(clientID string, conn *websocket.Conn) {
+	defer func() {
+		// 连接关闭时执行清理
+		s.unregisterClient(clientID)
+		conn.Close()
+	}()
+
 	for {
 		var resp types.ForwardResponse
 
 		if err := conn.ReadJSON(&resp); err != nil {
 			log.Printf("读取客户端 %s 响应失败: %v", clientID, err)
-			return
+			return // 触发defer进行清理
 		}
 
 		s.reqMu.RLock()
@@ -251,6 +257,41 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 		s.reqMu.Unlock()
 		return
 	}
+}
+
+func (s *Server) unregisterClient(clientID string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	client, exists := s.clients[clientID]
+	if !exists {
+		return
+	}
+
+	// 清理模型到客户端的映射
+	for _, model := range client.models {
+		// 查找该模型对应的客户端列表
+		if clients, ok := s.modelClients[model.ID]; ok {
+			// 创建新切片排除当前客户端
+			newClients := make([]string, 0, len(clients))
+			for _, cid := range clients {
+				if cid != clientID {
+					newClients = append(newClients, cid)
+				}
+			}
+
+			// 更新或删除映射
+			if len(newClients) > 0 {
+				s.modelClients[model.ID] = newClients
+			} else {
+				delete(s.modelClients, model.ID)
+			}
+		}
+	}
+
+	// 删除客户端记录
+	delete(s.clients, clientID)
+	log.Printf("客户端 %s 已注销，剩余客户端数: %d", clientID, len(s.clients))
 }
 
 func (s *Server) Start(host string, port string) error {
