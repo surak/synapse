@@ -146,25 +146,51 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// 收集所有唯一的模型
-	modelMap := make(map[string]types.ModelInfo)
+	// 收集所有唯一的模型并添加客户端计数
+	modelMap := make(map[string]struct {
+		types.ModelInfo
+		ClientCount int `json:"client_count"`
+	})
+	
+	// 首先收集所有模型信息
 	for _, client := range s.clients {
 		for _, model := range client.models {
-			modelMap[model.ID] = model
+			if existing, exists := modelMap[model.ID]; exists {
+				// 如果模型已存在，只更新客户端计数
+				existing.ClientCount = len(s.modelClients[model.ID])
+				modelMap[model.ID] = existing
+			} else {
+				modelMap[model.ID] = struct {
+					types.ModelInfo
+					ClientCount int `json:"client_count"`
+				}{
+					ModelInfo:   model,
+					ClientCount: len(s.modelClients[model.ID]),
+				}
+			}
 		}
 	}
 
-	models := make([]types.ModelInfo, 0, len(modelMap))
+	// 转换为切片
+	models := make([]struct {
+		types.ModelInfo
+		ClientCount int `json:"client_count"`
+	}, 0, len(modelMap))
 	for _, model := range modelMap {
 		models = append(models, model)
 	}
 
-	response := types.ModelsResponse{
+	response := struct {
+		Object string `json:"object"`
+		Data   []struct {
+			types.ModelInfo
+			ClientCount int `json:"client_count"`
+		} `json:"data"`
+	}{
 		Object: "list",
 		Data:   models,
 	}
 
-	// 设置正确的Content-Type头
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(response)
 }
