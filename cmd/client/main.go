@@ -3,7 +3,8 @@ package main
 import (
 	"flag"
 	"log"
-	"github.com/yourusername/yourproject/internal/client"
+
+	"github.com/zeyugao/synapse/internal/client"
 )
 
 func main() {
@@ -21,4 +22,4 @@ func main() {
 
 	// 保持程序运行
 	select {}
-} 
+}

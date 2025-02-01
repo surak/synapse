@@ -3,7 +3,8 @@ package main
 import (
 	"flag"
 	"log"
-	"github.com/yourusername/yourproject/internal/server"
+
+	"github.com/zeyugao/synapse/internal/server"
 )
 
 func main() {
@@ -16,4 +17,4 @@ func main() {
 	if err := server.Start(*host, *port); err != nil {
 		log.Fatal(err)
 	}
-} 
+}

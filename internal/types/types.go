@@ -1,28 +1,30 @@
 package types
 
+import "encoding/json"
+
 // ModelInfo 存储模型信息
 type ModelInfo struct {
-    ID      string   `json:"id"`
-    Object  string   `json:"object"`
-    Created int64    `json:"created"`
-    Owned   bool     `json:"owned_by"`
+	ID      string `json:"id"`
+	Object  string `json:"object"`
+	Created int64  `json:"created"`
+	Owned   bool   `json:"owned_by"`
 }
 
 // ModelsResponse 上游API返回的模型列表
 type ModelsResponse struct {
-    Object string      `json:"object"`
-    Data   []ModelInfo `json:"data"`
+	Object string      `json:"object"`
+	Data   []ModelInfo `json:"data"`
 }
 
 // ClientRegistration 客户端注册信息
 type ClientRegistration struct {
-    ClientID string     `json:"client_id"`
-    Models   []ModelInfo `json:"models"`
+	ClientID string      `json:"client_id"`
+	Models   []ModelInfo `json:"models"`
 }
 
 // ForwardRequest 转发请求的结构
 type ForwardRequest struct {
-    Model string          `json:"model"`
-    Path  string          `json:"path"`
-    Body  json.RawMessage `json:"body"`
-} 
+	Model string          `json:"model"`
+	Path  string          `json:"path"`
+	Body  json.RawMessage `json:"body"`
+}
