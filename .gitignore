@@ -1,5 +1,3 @@
 .direnv
 .DS_Store
-server
-client
 bin/
