@@ -20,15 +20,16 @@ import (
 )
 
 type Client struct {
-	Upstream     string
-	ServerURL    string // 改为直接使用服务器URL
-	ClientID     string
-	WSAuthKey    string
-	models       []types.ModelInfo
-	conn         *websocket.Conn
-	mu           sync.Mutex
-	reconnecting bool
-	closing      bool
+	Upstream        string
+	ServerURL       string // 改为直接使用服务器URL
+	ClientID        string
+	WSAuthKey       string
+	models          []types.ModelInfo
+	conn            *websocket.Conn
+	mu              sync.Mutex
+	reconnecting    bool
+	closing         bool
+	heartbeatTicker *time.Ticker // 添加心跳定时器
 }
 
 func NewClient(upstream, serverURL string) *Client {
@@ -86,6 +87,10 @@ func (c *Client) Connect() error {
 		return err
 	}
 	log.Printf("已发送客户端注册信息，ID: %s", c.ClientID)
+
+	// 在成功连接后启动心跳
+	c.heartbeatTicker = time.NewTicker(15 * time.Second)
+	go c.startHeartbeat()
 
 	go c.handleRequests()
 	return nil
@@ -278,11 +283,26 @@ func (c *Client) reconnect() {
 	}
 }
 
+func (c *Client) startHeartbeat() {
+	for range c.heartbeatTicker.C {
+		heartbeat := types.ForwardResponse{
+			Timestamp: time.Now().Unix(),
+			Type:      types.TypeHeartbeat,
+		}
+		if err := c.writeJSON(heartbeat); err != nil {
+			log.Printf("发送心跳失败: %v", err)
+		}
+	}
+}
+
 func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.closing = true
 	if c.conn != nil {
 		c.conn.Close()
+	}
+	if c.heartbeatTicker != nil {
+		c.heartbeatTicker.Stop()
 	}
 }

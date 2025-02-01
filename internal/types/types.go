@@ -39,6 +39,7 @@ type ForwardRequest struct {
 const (
 	TypeNormal = 0 // 普通响应
 	TypeStream = 1 // 流式响应
+	TypeHeartbeat = 2 // 心跳类型
 )
 
 type ForwardResponse struct {
@@ -48,11 +49,5 @@ type ForwardResponse struct {
 	Body       []byte      `json:"body"`
 	Type       int         `json:"type"` // TypeNormal 或 TypeStream
 	Done       bool        `json:"done"` // 用于流式结束标记
-}
-
-// 在ForwardResponse结构体后添加
-type StreamChunk struct {
-	RequestID string `json:"request_id"`
-	Data      []byte `json:"data"`
-	Done      bool   `json:"done"`
+	Timestamp  int64       `json:"timestamp"`
 }

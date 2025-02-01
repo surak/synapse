@@ -104,40 +104,49 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleClientResponses(clientID string, conn *websocket.Conn) {
 	defer func() {
-		// 连接关闭时执行清理
 		s.unregisterClient(clientID)
 		conn.Close()
 	}()
 
 	for {
-		var resp types.ForwardResponse
+		var msg types.ForwardResponse
 
-		if err := conn.ReadJSON(&resp); err != nil {
-			log.Printf("读取客户端 %s 响应失败: %v", clientID, err)
-			return // 触发defer进行清理
+		if err := conn.ReadJSON(&msg); err != nil {
+			log.Printf("读取客户端 %s 消息失败: %v", clientID, err)
+			return
 		}
 
-		s.reqMu.RLock()
-		respChan, exists := s.pendingRequests[resp.RequestID]
-		s.reqMu.RUnlock()
-
-		if exists {
-			// 发送响应数据
-			respChan <- resp
-
-			if resp.Type == types.TypeStream && resp.Done {
-				// 处理流式结束标记
-				close(respChan)
-				s.reqMu.Lock()
-				delete(s.pendingRequests, resp.RequestID)
-				s.reqMu.Unlock()
-			} else if resp.Type == types.TypeNormal {
-				// 普通响应需要关闭通道
-				s.reqMu.Lock()
-				delete(s.pendingRequests, resp.RequestID)
-				close(respChan)
-				s.reqMu.Unlock()
+		switch msg.Type {
+		case types.TypeNormal, types.TypeStream:
+			resp := types.ForwardResponse{
+				RequestID:  msg.RequestID,
+				StatusCode: msg.StatusCode,
+				Header:     msg.Header,
+				Body:       msg.Body,
+				Type:       msg.Type,
+				Done:       msg.Done,
 			}
+			s.handleForwardResponse(resp)
+		case types.TypeHeartbeat:
+			// ignore heartbeat
+		default:
+			log.Printf("未知消息类型: %d", msg.Type)
+		}
+	}
+}
+
+func (s *Server) handleForwardResponse(resp types.ForwardResponse) {
+	s.reqMu.RLock()
+	respChan, exists := s.pendingRequests[resp.RequestID]
+	s.reqMu.RUnlock()
+
+	if exists {
+		respChan <- resp
+		if (resp.Type == types.TypeStream && resp.Done) || resp.Type == types.TypeNormal {
+			s.reqMu.Lock()
+			delete(s.pendingRequests, resp.RequestID)
+			close(respChan)
+			s.reqMu.Unlock()
 		}
 	}
 }
@@ -151,7 +160,7 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 		types.ModelInfo
 		ClientCount int `json:"client_count"`
 	})
-	
+
 	// 首先收集所有模型信息
 	for _, client := range s.clients {
 		for _, model := range client.models {
