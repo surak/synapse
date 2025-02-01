@@ -10,16 +10,15 @@ import (
 
 func main() {
 	upstream := flag.String("upstream", "http://localhost:8081", "Upstream host")
-	serverHost := flag.String("server-host", "localhost", "Server host")
-	serverPort := flag.String("server-port", "8080", "Server port")
+	serverURL := flag.String("server-url", "ws://localhost:8080/ws", "WebSocket服务器URL")
 	wsAuthKey := flag.String("ws-auth-key", "", "WebSocket鉴权密钥")
 	flag.Parse()
 
-	client := client.NewClient(*upstream, *serverHost, *serverPort)
+	client := client.NewClient(*upstream, *serverURL)
 	client.WSAuthKey = *wsAuthKey
 	defer client.Close()
 
-	log.Printf("Connecting to server at %s:%s", *serverHost, *serverPort)
+	log.Printf("Connecting to server at %s", *serverURL)
 
 	// 保持程序运行
 	for {

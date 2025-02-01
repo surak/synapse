@@ -21,23 +21,21 @@ import (
 
 type Client struct {
 	Upstream     string
-	ServerHost   string
-	ServerPort   string
+	ServerURL    string // 改为直接使用服务器URL
 	ClientID     string
-	WSAuthKey    string // 新增WebSocket鉴权密钥字段
+	WSAuthKey    string
 	models       []types.ModelInfo
 	conn         *websocket.Conn
-	mu           sync.Mutex // 新增互斥锁
-	reconnecting bool       // 新增重连状态标识
-	closing      bool       // 新增关闭状态标识
+	mu           sync.Mutex
+	reconnecting bool
+	closing      bool
 }
 
-func NewClient(upstream, serverHost, serverPort string) *Client {
+func NewClient(upstream, serverURL string) *Client {
 	return &Client{
-		Upstream:   upstream,
-		ServerHost: serverHost,
-		ServerPort: serverPort,
-		ClientID:   generateClientID(), // 实现一个生成唯一ID的函数
+		Upstream:  upstream,
+		ServerURL: serverURL,
+		ClientID:  generateClientID(),
 	}
 }
 
@@ -61,16 +59,15 @@ func (c *Client) fetchModels() error {
 
 func (c *Client) Connect() error {
 	if err := c.fetchModels(); err != nil {
-		log.Printf("初始化模型获取失败: %v", err)
 		return err
 	}
 
-	// 添加鉴权参数到WebSocket连接
-	wsURL := fmt.Sprintf("ws://%s:%s/ws", c.ServerHost, c.ServerPort)
+	// 直接使用配置的服务器URL
+	wsURL := c.ServerURL
 	if c.WSAuthKey != "" {
 		wsURL += "?ws_auth_key=" + c.WSAuthKey
 	}
-	
+
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		log.Printf("连接服务器失败: %v", err)
