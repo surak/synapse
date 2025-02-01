@@ -23,6 +23,8 @@ type Server struct {
 	upgrader        websocket.Upgrader
 	pendingRequests map[string]chan types.ForwardResponse
 	reqMu           sync.RWMutex
+	apiAuthKey      string // 新增API鉴权密钥
+	wsAuthKey       string // 新增WebSocket鉴权密钥
 }
 
 type Client struct {
@@ -37,11 +39,13 @@ func (c *Client) writeJSON(v any) error {
 	return c.conn.WriteJSON(v)
 }
 
-func NewServer() *Server {
+func NewServer(apiAuthKey, wsAuthKey string) *Server {
 	return &Server{
 		clients:         make(map[string]*Client),
 		modelClients:    make(map[string][]string),
 		pendingRequests: make(map[string]chan types.ForwardResponse),
+		apiAuthKey:      apiAuthKey,
+		wsAuthKey:       wsAuthKey,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
 				return true
@@ -57,6 +61,15 @@ func generateRequestID() string {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	// 检查WebSocket鉴权
+	if s.wsAuthKey != "" {
+		authKey := r.URL.Query().Get("ws_auth_key")
+		if authKey != s.wsAuthKey {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		log.Printf("WebSocket升级失败: %v", err)
@@ -155,6 +168,15 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
+	// 检查API鉴权
+	if s.apiAuthKey != "" {
+		authHeader := r.Header.Get("Authorization")
+		if authHeader != "Bearer "+s.apiAuthKey {
+			http.Error(w, "Unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
 	if r.URL.Path == "/v1/models" {
 		s.handleModels(w, r)
 		return

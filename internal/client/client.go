@@ -24,6 +24,7 @@ type Client struct {
 	ServerHost   string
 	ServerPort   string
 	ClientID     string
+	WSAuthKey    string // 新增WebSocket鉴权密钥字段
 	models       []types.ModelInfo
 	conn         *websocket.Conn
 	mu           sync.Mutex // 新增互斥锁
@@ -64,7 +65,12 @@ func (c *Client) Connect() error {
 		return err
 	}
 
+	// 添加鉴权参数到WebSocket连接
 	wsURL := fmt.Sprintf("ws://%s:%s/ws", c.ServerHost, c.ServerPort)
+	if c.WSAuthKey != "" {
+		wsURL += "?ws_auth_key=" + c.WSAuthKey
+	}
+	
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
 		log.Printf("连接服务器失败: %v", err)
