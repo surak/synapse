@@ -8,20 +8,25 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
 	"net/http"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/zeyugao/synapse/internal/types"
 )
 
 type Client struct {
-	Upstream   string
-	ServerHost string
-	ServerPort string
-	ClientID   string
-	models     []types.ModelInfo
-	conn       *websocket.Conn
+	Upstream     string
+	ServerHost   string
+	ServerPort   string
+	ClientID     string
+	models       []types.ModelInfo
+	conn         *websocket.Conn
+	mu           sync.Mutex // 新增互斥锁
+	reconnecting bool       // 新增重连状态标识
+	closing      bool       // 新增关闭状态标识
 }
 
 func NewClient(upstream, serverHost, serverPort string) *Client {
@@ -85,7 +90,11 @@ func (c *Client) handleRequests() {
 	for {
 		var req types.ForwardRequest
 		if err := c.conn.ReadJSON(&req); err != nil {
-			log.Printf("读取请求失败: %v", err)
+			if c.closing {
+				return
+			}
+			log.Printf("连接异常: %v，尝试重新连接...", err)
+			go c.reconnect()
 			return
 		}
 		log.Printf("收到转发请求 - 模型: %s, 路径: %s", req.Model, req.Path)
@@ -144,7 +153,7 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 	log.Printf("上游响应状态码: %d", resp.StatusCode)
 	log.Printf("上游响应头: %+v", resp.Header)
 
-	if resp.Header.Get("Content-Type") == "text/event-stream" {
+	if mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err == nil && mediaType == "text/event-stream" {
 		log.Printf("处理流式响应")
 		c.handleStreamResponse(resp.Body)
 	} else {
@@ -211,4 +220,42 @@ func generateClientID() string {
 		return "fallback-id"
 	}
 	return hex.EncodeToString(b)
+}
+
+func (c *Client) reconnect() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.reconnecting || c.closing {
+		return
+	}
+
+	c.reconnecting = true
+	defer func() { c.reconnecting = false }()
+
+	retryWait := 1 * time.Second
+	maxRetryWait := 30 * time.Second
+
+	for {
+		log.Printf("尝试重新连接...")
+		if err := c.Connect(); err == nil {
+			log.Printf("重连成功")
+			return
+		}
+
+		if retryWait < maxRetryWait {
+			retryWait *= 2
+		}
+		log.Printf("重连失败，%v 后重试...", retryWait)
+		time.Sleep(retryWait)
+	}
+}
+
+func (c *Client) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.closing = true
+	if c.conn != nil {
+		c.conn.Close()
+	}
 }

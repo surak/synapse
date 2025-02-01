@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"log"
+	"time"
 
 	"github.com/zeyugao/synapse/internal/client"
 )
@@ -14,11 +15,17 @@ func main() {
 	flag.Parse()
 
 	client := client.NewClient(*upstream, *serverHost, *serverPort)
+	defer client.Close()
+
 	log.Printf("Connecting to server at %s:%s", *serverHost, *serverPort)
-	if err := client.Connect(); err != nil {
-		log.Fatal(err)
-	}
 
 	// 保持程序运行
-	select {}
+	for {
+		if err := client.Connect(); err != nil {
+			log.Printf("连接失败: %v，5秒后重试...", err)
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		select {} // 阻塞主线程直到连接断开
+	}
 }

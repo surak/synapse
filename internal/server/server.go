@@ -144,6 +144,8 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = io.NopCloser(bytes.NewBuffer(body))
 
+	log.Printf("收到请求: %s", string(body))
+
 	var modelReq struct {
 		Model string `json:"model"`
 	}
@@ -154,6 +156,8 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 
 	// 生成请求ID
 	requestID := generateRequestID()
+
+	log.Printf("请求ID: %s", requestID)
 
 	// 创建响应通道
 	respChan := make(chan types.ForwardResponse, 1)
@@ -184,6 +188,8 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 	client := s.clients[clientID]
 	s.mu.RUnlock()
 
+	log.Printf("选择客户端: %s", clientID)
+
 	if err := client.conn.WriteJSON(req); err != nil {
 		s.reqMu.Lock()
 		delete(s.pendingRequests, requestID)
@@ -192,6 +198,8 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Failed to forward request", http.StatusInternalServerError)
 		return
 	}
+
+	log.Printf("已发送请求到客户端: %s", clientID)
 
 	// 等待响应
 	select {
