@@ -128,7 +128,13 @@ func (s *Server) handleClientResponses(clientID string, conn *websocket.Conn) {
 			}
 			s.handleForwardResponse(resp)
 		case types.TypeHeartbeat:
-			// ignore heartbeat
+			// 发送pong响应
+			pongReq := types.ForwardRequest{
+				Type: types.TypePong,
+			}
+			if err := conn.WriteJSON(pongReq); err != nil {
+				log.Printf("发送pong响应失败: %v", err)
+			}
 		default:
 			log.Printf("未知消息类型: %d", msg.Type)
 		}
@@ -246,6 +252,7 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 
 	// 构建转发请求
 	req := types.ForwardRequest{
+		Type:      types.TypeNormal,
 		RequestID: requestID,
 		Model:     modelReq.Model,
 		Method:    r.Method,

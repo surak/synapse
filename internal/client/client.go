@@ -107,8 +107,15 @@ func (c *Client) handleRequests() {
 			go c.reconnect()
 			return
 		}
-		log.Printf("收到转发请求 - 模型: %s, 路径: %s", req.Model, req.Path)
-		go c.forwardRequest(req)
+
+		// 处理不同类型请求
+		switch req.Type {
+		case types.TypePong:
+		case types.TypeNormal:
+			go c.forwardRequest(req)
+		default:
+			log.Printf("未知请求类型: %d", req.Type)
+		}
 	}
 }
 
@@ -291,6 +298,8 @@ func (c *Client) startHeartbeat() {
 		}
 		if err := c.writeJSON(heartbeat); err != nil {
 			log.Printf("发送心跳失败: %v", err)
+			go c.reconnect() // 添加重连触发
+			return
 		}
 	}
 }

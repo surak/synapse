@@ -26,6 +26,7 @@ type ClientRegistration struct {
 
 // ForwardRequest 转发请求的结构
 type ForwardRequest struct {
+	Type      int         `json:"type"`
 	RequestID string      `json:"request_id"`
 	Model     string      `json:"model"`
 	Method    string      `json:"method"`
@@ -37,9 +38,10 @@ type ForwardRequest struct {
 
 // ResponseType 表示响应类型
 const (
-	TypeNormal = 0 // 普通响应
-	TypeStream = 1 // 流式响应
+	TypeNormal    = 0 // 普通响应
+	TypeStream    = 1 // 流式响应
 	TypeHeartbeat = 2 // 心跳类型
+	TypePong      = 3 // Pong响应
 )
 
 type ForwardResponse struct {
