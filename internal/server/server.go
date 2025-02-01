@@ -96,20 +96,17 @@ func (s *Server) handleClientResponses(clientID string, conn *websocket.Conn) {
 		s.reqMu.RUnlock()
 
 		if exists {
-			// 处理流式结束标记
-			if resp.Done {
+			// 发送响应数据
+			respChan <- resp
+
+			if resp.Type == types.TypeStream && resp.Done {
+				// 处理流式结束标记
 				close(respChan)
 				s.reqMu.Lock()
 				delete(s.pendingRequests, resp.RequestID)
 				s.reqMu.Unlock()
-				continue
-			}
-
-			// 发送响应数据
-			respChan <- resp
-
-			// 普通响应需要关闭通道
-			if resp.Type == types.TypeNormal {
+			} else if resp.Type == types.TypeNormal {
+				// 普通响应需要关闭通道
 				s.reqMu.Lock()
 				delete(s.pendingRequests, resp.RequestID)
 				close(respChan)
@@ -158,8 +155,6 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = io.NopCloser(bytes.NewBuffer(body))
 
-	log.Printf("收到请求: %s", string(body))
-
 	var modelReq struct {
 		Model string `json:"model"`
 	}
@@ -170,8 +165,6 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 
 	// 生成请求ID
 	requestID := generateRequestID()
-
-	log.Printf("请求ID: %s", requestID)
 
 	// 创建响应通道
 	respChan := make(chan types.ForwardResponse, 1)
@@ -202,8 +195,6 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 	client := s.clients[clientID]
 	s.mu.RUnlock()
 
-	log.Printf("选择客户端: %s", clientID)
-
 	if err := client.conn.WriteJSON(req); err != nil {
 		s.reqMu.Lock()
 		delete(s.pendingRequests, requestID)
@@ -213,12 +204,9 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("已发送请求到客户端: %s", clientID)
-
 	// 等待响应
 	select {
 	case resp := <-respChan:
-		log.Printf("收到响应: %+v", resp)
 		for k, values := range resp.Header {
 			for _, v := range values {
 				w.Header().Add(k, v)
@@ -243,8 +231,14 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 			for {
 				select {
 				case chunk := <-respChan:
-					fmt.Fprintf(w, "data: %s\n\n", chunk.Body)
-					flusher.Flush()
+					if chunk.Done {
+						fmt.Fprintf(w, "data: [DONE]\n\n")
+						flusher.Flush()
+						return
+					} else {
+						fmt.Fprintf(w, "data: %s\n\n", chunk.Body)
+						flusher.Flush()
+					}
 				case <-r.Context().Done():
 					return
 				}

@@ -105,17 +105,12 @@ func (c *Client) handleRequests() {
 }
 
 func (c *Client) forwardRequest(req types.ForwardRequest) {
-	log.Printf("开始处理请求 - 模型: %s, 路径: %s", req.Model, req.Path)
-	defer log.Printf("完成处理请求 - 模型: %s, 路径: %s", req.Model, req.Path)
-
 	var upstreamURL string
 	if req.Query == "" {
 		upstreamURL = fmt.Sprintf("%s%s", c.Upstream, req.Path)
 	} else {
 		upstreamURL = fmt.Sprintf("%s%s?%s", c.Upstream, req.Path, req.Query)
 	}
-	log.Printf("转发请求到上游: %s %s", req.Method, upstreamURL)
-	log.Printf("请求内容: %s", string(req.Body))
 
 	httpReq, err := http.NewRequest(req.Method, upstreamURL, bytes.NewReader(req.Body))
 	if err != nil {
@@ -124,6 +119,7 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 			RequestID:  req.RequestID,
 			StatusCode: http.StatusInternalServerError,
 			Body:       []byte(fmt.Sprintf("Error: %v", err)),
+			Type:       types.TypeNormal,
 		}
 		c.conn.WriteJSON(errResp)
 		return
@@ -145,20 +141,18 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 			RequestID:  req.RequestID,
 			StatusCode: http.StatusInternalServerError,
 			Body:       []byte(fmt.Sprintf("Error: %v", err)),
+			Type:       types.TypeNormal,
 		}
 		if err := c.conn.WriteJSON(errResp); err != nil {
 			log.Printf("发送错误响应失败: %v", err)
 		}
 		return
 	}
-	defer resp.Body.Close()
-	log.Printf("上游响应状态码: %d", resp.StatusCode)
-	log.Printf("上游响应头: %+v", resp.Header)
 
 	if mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err == nil && mediaType == "text/event-stream" {
-		log.Printf("处理流式响应")
 		go c.handleStreamResponse(resp.Body, req.RequestID)
 	} else {
+		defer resp.Body.Close()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("读取响应体失败: %v", err)
@@ -166,14 +160,13 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 				RequestID:  req.RequestID,
 				StatusCode: http.StatusInternalServerError,
 				Body:       []byte(fmt.Sprintf("Error: %v", err)),
+				Type:       types.TypeNormal,
 			}
 			if err := c.conn.WriteJSON(errResp); err != nil {
 				log.Printf("发送错误响应失败: %v", err)
 			}
 			return
 		}
-		log.Printf("收到非流式响应，长度: %d bytes", len(body))
-		log.Printf("响应内容: %s", string(body))
 
 		// 创建转发响应结构
 		forwardResp := types.ForwardResponse{
@@ -192,12 +185,12 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 			writeMu.Unlock()
 			return
 		}
-		log.Printf("响应已发送")
 		writeMu.Unlock()
 	}
 }
 
-func (c *Client) handleStreamResponse(reader io.Reader, requestID string) {
+func (c *Client) handleStreamResponse(reader io.ReadCloser, requestID string) {
+	defer reader.Close()
 	scanner := bufio.NewScanner(reader)
 	var buffer bytes.Buffer
 
@@ -220,26 +213,25 @@ func (c *Client) handleStreamResponse(reader io.Reader, requestID string) {
 			}
 
 			buffer.Write(content)
-			buffer.WriteByte('\n')
-
-			// 当遇到空行时发送一个数据块
-			if len(line) == 0 {
-				if buffer.Len() > 0 {
-					chunk := types.ForwardResponse{
-						RequestID:  requestID,
-						Type:       types.TypeStream,
-						StatusCode: http.StatusOK,
-						Body:       buffer.Bytes(),
-					}
-					if err := c.conn.WriteJSON(chunk); err != nil {
-						log.Printf("发送流数据块失败: %v", err)
-						return
-					}
-					buffer.Reset()
+		}
+		// 当遇到空行时发送一个数据块
+		if len(line) == 0 {
+			if buffer.Len() > 0 {
+				chunk := types.ForwardResponse{
+					RequestID:  requestID,
+					Type:       types.TypeStream,
+					StatusCode: http.StatusOK,
+					Body:       buffer.Bytes(),
 				}
+				if err := c.conn.WriteJSON(chunk); err != nil {
+					log.Printf("发送流数据块失败: %v", err)
+					return
+				}
+				buffer.Reset()
 			}
 		}
 	}
+	log.Printf("流式响应处理完成")
 }
 
 func generateClientID() string {
