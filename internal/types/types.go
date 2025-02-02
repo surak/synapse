@@ -42,6 +42,7 @@ const (
 	TypeStream    = 1 // 流式响应
 	TypeHeartbeat = 2 // 心跳类型
 	TypePong      = 3 // Pong响应
+	TypeClientClose = 4 // 客户端关闭请求
 )
 
 type ForwardResponse struct {

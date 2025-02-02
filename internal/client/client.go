@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -29,7 +30,8 @@ type Client struct {
 	mu              sync.Mutex
 	reconnecting    bool
 	closing         bool
-	heartbeatTicker *time.Ticker // 添加心跳定时器
+	heartbeatTicker *time.Ticker                  // 添加心跳定时器
+	cancelMap       map[string]context.CancelFunc // 新增：requestID到取消函数的映射
 }
 
 func NewClient(upstream, serverURL string) *Client {
@@ -37,6 +39,7 @@ func NewClient(upstream, serverURL string) *Client {
 		Upstream:  upstream,
 		ServerURL: serverURL,
 		ClientID:  generateClientID(),
+		cancelMap: make(map[string]context.CancelFunc),
 	}
 }
 
@@ -113,6 +116,14 @@ func (c *Client) handleRequests() {
 		case types.TypePong:
 		case types.TypeNormal:
 			go c.forwardRequest(req)
+		case types.TypeClientClose: // 新增处理关闭请求
+			c.mu.Lock()
+			cancel, exists := c.cancelMap[req.RequestID]
+			c.mu.Unlock()
+			if exists {
+				cancel() // 取消对应的请求
+				log.Printf("已取消请求: %s", req.RequestID)
+			}
 		default:
 			log.Printf("未知请求类型: %d", req.Type)
 		}
@@ -126,6 +137,19 @@ func (c *Client) writeJSON(v any) error {
 }
 
 func (c *Client) forwardRequest(req types.ForwardRequest) {
+	// 创建可取消的context
+	ctx, cancel := context.WithCancel(context.Background())
+	c.mu.Lock()
+	c.cancelMap[req.RequestID] = cancel
+	c.mu.Unlock()
+
+	// 在函数返回时清理
+	defer func() {
+		c.mu.Lock()
+		delete(c.cancelMap, req.RequestID)
+		c.mu.Unlock()
+	}()
+
 	var upstreamURL string
 	if req.Query == "" {
 		upstreamURL = fmt.Sprintf("%s%s", c.Upstream, req.Path)
@@ -133,7 +157,7 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 		upstreamURL = fmt.Sprintf("%s%s?%s", c.Upstream, req.Path, req.Query)
 	}
 
-	httpReq, err := http.NewRequest(req.Method, upstreamURL, bytes.NewReader(req.Body))
+	httpReq, err := http.NewRequestWithContext(ctx, req.Method, upstreamURL, bytes.NewReader(req.Body))
 	if err != nil {
 		log.Printf("创建上游请求失败: %v", err)
 		errResp := types.ForwardResponse{

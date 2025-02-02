@@ -274,16 +274,21 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 	client := s.clients[clientID]
 	s.mu.RUnlock()
 
-	if err := client.writeJSON(req); err != nil {
+	// 等待响应
+	defer func() {
 		s.reqMu.Lock()
-		delete(s.pendingRequests, requestID)
-		close(respChan)
+		if ch, exists := s.pendingRequests[requestID]; exists {
+			delete(s.pendingRequests, requestID)
+			close(ch)
+		}
 		s.reqMu.Unlock()
+	}()
+
+	if err := client.writeJSON(req); err != nil {
 		http.Error(w, "Failed to forward request", http.StatusInternalServerError)
 		return
 	}
 
-	// 等待响应
 	select {
 	case resp := <-respChan:
 		for k, values := range resp.Header {
@@ -319,15 +324,27 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 						flusher.Flush()
 					}
 				case <-r.Context().Done():
+					// 发送客户端关闭请求
+					closeReq := types.ForwardRequest{
+						Type:      types.TypeClientClose,
+						RequestID: requestID,
+					}
+					if err := client.writeJSON(closeReq); err != nil {
+						log.Printf("发送关闭请求失败: %v", err)
+					}
 					return
 				}
 			}
 		}
 	case <-r.Context().Done():
-		s.reqMu.Lock()
-		delete(s.pendingRequests, requestID)
-		close(respChan)
-		s.reqMu.Unlock()
+		// 发送客户端关闭请求
+		closeReq := types.ForwardRequest{
+			Type:      types.TypeClientClose,
+			RequestID: requestID,
+		}
+		if err := client.writeJSON(closeReq); err != nil {
+			log.Printf("发送关闭请求失败: %v", err)
+		}
 		return
 	}
 }
