@@ -87,10 +87,11 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	log.Printf("新客户端连接: %s, 注册模型数: %d", registration.ClientID, len(registration.Models))
 
 	s.mu.Lock()
-	s.clients[registration.ClientID] = &Client{
+	client := &Client{
 		conn:   conn,
 		models: registration.Models,
 	}
+	s.clients[registration.ClientID] = client
 
 	// 更新模型到客户端的映射
 	for _, model := range registration.Models {
@@ -99,19 +100,19 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 
 	// 添加处理响应的 goroutine
-	go s.handleClientResponses(registration.ClientID, conn)
+	go s.handleClientResponses(registration.ClientID, client)
 }
 
-func (s *Server) handleClientResponses(clientID string, conn *websocket.Conn) {
+func (s *Server) handleClientResponses(clientID string, client *Client) {
 	defer func() {
+		client.conn.Close()
 		s.unregisterClient(clientID)
-		conn.Close()
 	}()
 
 	for {
 		var msg types.ForwardResponse
 
-		if err := conn.ReadJSON(&msg); err != nil {
+		if err := client.conn.ReadJSON(&msg); err != nil {
 			log.Printf("读取客户端 %s 消息失败: %v", clientID, err)
 			return
 		}
@@ -132,7 +133,7 @@ func (s *Server) handleClientResponses(clientID string, conn *websocket.Conn) {
 			pongReq := types.ForwardRequest{
 				Type: types.TypePong,
 			}
-			if err := conn.WriteJSON(pongReq); err != nil {
+			if err := client.writeJSON(pongReq); err != nil {
 				log.Printf("发送pong响应失败: %v", err)
 			}
 		default:
