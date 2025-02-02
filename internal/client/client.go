@@ -30,8 +30,8 @@ type Client struct {
 	mu              sync.Mutex
 	reconnecting    bool
 	closing         bool
-	heartbeatTicker *time.Ticker                  // 添加心跳定时器
-	cancelMap       map[string]context.CancelFunc // 新增：requestID到取消函数的映射
+	heartbeatTicker *time.Ticker // 添加心跳定时器
+	cancelMap       map[string]context.CancelFunc
 }
 
 func NewClient(upstream, serverURL string) *Client {
@@ -122,7 +122,6 @@ func (c *Client) handleRequests() {
 			c.mu.Unlock()
 			if exists {
 				cancel() // 取消对应的请求
-				log.Printf("已取消请求: %s", req.RequestID)
 			}
 		default:
 			log.Printf("未知请求类型: %d", req.Type)
@@ -195,11 +194,11 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 		}
 		return
 	}
+	defer resp.Body.Close()
 
 	if mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err == nil && mediaType == "text/event-stream" {
-		go c.handleStreamResponse(resp.Body, req.RequestID)
+		c.handleStreamResponse(resp.Body, req.RequestID, ctx)
 	} else {
-		defer resp.Body.Close()
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("读取响应体失败: %v", err)
@@ -231,49 +230,53 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 	}
 }
 
-func (c *Client) handleStreamResponse(reader io.ReadCloser, requestID string) {
-	defer reader.Close()
+func (c *Client) handleStreamResponse(reader io.Reader, requestID string, ctx context.Context) {
 	scanner := bufio.NewScanner(reader)
 	var buffer bytes.Buffer
 
 	for scanner.Scan() {
-		line := scanner.Bytes()
-		if bytes.HasPrefix(line, []byte("data: ")) {
-			content := bytes.TrimSpace(line[6:])
-			if bytes.Equal(content, []byte("[DONE]")) {
-				// 发送流结束标记
-				doneResp := types.ForwardResponse{
-					RequestID:  requestID,
-					Type:       types.TypeStream,
-					Done:       true,
-					StatusCode: http.StatusOK,
-				}
-				if err := c.writeJSON(doneResp); err != nil {
-					log.Printf("发送流结束标记失败: %v", err)
-				}
-				return
-			}
-
-			buffer.Write(content)
-		}
-		// 当遇到空行时发送一个数据块
-		if len(line) == 0 {
-			if buffer.Len() > 0 {
-				chunk := types.ForwardResponse{
-					RequestID:  requestID,
-					Type:       types.TypeStream,
-					StatusCode: http.StatusOK,
-					Body:       buffer.Bytes(),
-				}
-				if err := c.writeJSON(chunk); err != nil {
-					log.Printf("发送流数据块失败: %v", err)
+		select {
+		case <-ctx.Done():
+			log.Printf("请求 %s 已被取消", requestID)
+			return
+		default:
+			line := scanner.Bytes()
+			if bytes.HasPrefix(line, []byte("data: ")) {
+				content := bytes.TrimSpace(line[6:])
+				if bytes.Equal(content, []byte("[DONE]")) {
+					// 发送流结束标记
+					doneResp := types.ForwardResponse{
+						RequestID:  requestID,
+						Type:       types.TypeStream,
+						Done:       true,
+						StatusCode: http.StatusOK,
+					}
+					if err := c.writeJSON(doneResp); err != nil {
+						log.Printf("发送流结束标记失败: %v", err)
+					}
 					return
 				}
-				buffer.Reset()
+
+				buffer.Write(content)
+			}
+			// 当遇到空行时发送一个数据块
+			if len(line) == 0 {
+				if buffer.Len() > 0 {
+					chunk := types.ForwardResponse{
+						RequestID:  requestID,
+						Type:       types.TypeStream,
+						StatusCode: http.StatusOK,
+						Body:       buffer.Bytes(),
+					}
+					if err := c.writeJSON(chunk); err != nil {
+						log.Printf("发送流数据块失败: %v", err)
+						return
+					}
+					buffer.Reset()
+				}
 			}
 		}
 	}
-	log.Printf("流式响应处理完成")
 }
 
 func generateClientID() string {
