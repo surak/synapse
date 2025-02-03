@@ -136,6 +136,13 @@ func (s *Server) handleClientResponses(clientID string, client *Client) {
 			if err := client.writeJSON(pongReq); err != nil {
 				log.Printf("发送pong响应失败: %v", err)
 			}
+		case types.TypeModelUpdate:
+			var updateReq types.ModelUpdateRequest
+			if err := json.Unmarshal(msg.Body, &updateReq); err != nil {
+				log.Printf("解析模型更新请求失败: %v", err)
+				return
+			}
+			s.handleModelUpdate(updateReq)
 		default:
 			log.Printf("未知消息类型: %d", msg.Type)
 		}
@@ -383,6 +390,35 @@ func (s *Server) unregisterClient(clientID string) {
 	// 删除客户端记录
 	delete(s.clients, clientID)
 	log.Printf("客户端 %s 已注销，剩余客户端数: %d", clientID, len(s.clients))
+}
+
+func (s *Server) handleModelUpdate(update types.ModelUpdateRequest) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	client := s.clients[update.ClientID]
+	for _, model := range client.models {
+		if clients, ok := s.modelClients[model.ID]; ok {
+			newClients := make([]string, 0, len(clients))
+			for _, cid := range clients {
+				if cid != update.ClientID {
+					newClients = append(newClients, cid)
+				}
+			}
+			if len(newClients) > 0 {
+				s.modelClients[model.ID] = newClients
+			} else {
+				delete(s.modelClients, model.ID)
+			}
+		}
+	}
+
+	client.models = update.Models
+	for _, model := range update.Models {
+		s.modelClients[model.ID] = append(s.modelClients[model.ID], update.ClientID)
+	}
+
+	log.Printf("已更新客户端 %s 的模型列表，当前模型数: %d", update.ClientID, len(update.Models))
 }
 
 func (s *Server) Start(host string, port string) error {

@@ -43,6 +43,7 @@ const (
 	TypeHeartbeat = 2 // 心跳类型
 	TypePong      = 3 // Pong响应
 	TypeClientClose = 4 // 客户端关闭请求
+	TypeModelUpdate = 5 // 模型更新类型
 )
 
 type ForwardResponse struct {
@@ -53,4 +54,10 @@ type ForwardResponse struct {
 	Type       int         `json:"type"` // TypeNormal 或 TypeStream
 	Done       bool        `json:"done"` // 用于流式结束标记
 	Timestamp  int64       `json:"timestamp"`
+}
+
+// 添加模型更新请求结构
+type ModelUpdateRequest struct {
+	ClientID string      `json:"client_id"`
+	Models   []ModelInfo `json:"models"`
 }

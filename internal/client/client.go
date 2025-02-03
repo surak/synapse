@@ -22,7 +22,7 @@ import (
 
 type Client struct {
 	Upstream        string
-	ServerURL       string // 改为直接使用服务器URL
+	ServerURL       string
 	ClientID        string
 	WSAuthKey       string
 	models          []types.ModelInfo
@@ -30,16 +30,19 @@ type Client struct {
 	mu              sync.Mutex
 	reconnecting    bool
 	closing         bool
-	heartbeatTicker *time.Ticker // 添加心跳定时器
+	heartbeatTicker *time.Ticker
 	cancelMap       map[string]context.CancelFunc
+	syncTicker      *time.Ticker
 }
 
 func NewClient(upstream, serverURL string) *Client {
 	return &Client{
-		Upstream:  upstream,
-		ServerURL: serverURL,
-		ClientID:  generateClientID(),
-		cancelMap: make(map[string]context.CancelFunc),
+		Upstream:        upstream,
+		ServerURL:       serverURL,
+		ClientID:        generateClientID(),
+		cancelMap:       make(map[string]context.CancelFunc),
+		heartbeatTicker: time.NewTicker(15 * time.Second),
+		syncTicker:      time.NewTicker(30 * time.Second),
 	}
 }
 
@@ -91,10 +94,8 @@ func (c *Client) Connect() error {
 	}
 	log.Printf("已发送客户端注册信息，ID: %s", c.ClientID)
 
-	// 在成功连接后启动心跳
-	c.heartbeatTicker = time.NewTicker(15 * time.Second)
 	go c.startHeartbeat()
-
+	go c.startModelSync()
 	go c.handleRequests()
 	return nil
 }
@@ -319,6 +320,13 @@ func (c *Client) reconnect() {
 
 func (c *Client) startHeartbeat() {
 	for range c.heartbeatTicker.C {
+		if c.closing {
+			return
+		}
+		if c.reconnecting {
+			continue
+		}
+
 		heartbeat := types.ForwardResponse{
 			Timestamp: time.Now().Unix(),
 			Type:      types.TypeHeartbeat,
@@ -338,7 +346,79 @@ func (c *Client) Close() {
 	if c.conn != nil {
 		c.conn.Close()
 	}
-	if c.heartbeatTicker != nil {
-		c.heartbeatTicker.Stop()
+	c.heartbeatTicker.Stop()
+	c.syncTicker.Stop()
+}
+
+func (c *Client) startModelSync() {
+	for range c.syncTicker.C {
+		if c.closing {
+			return
+		}
+		if c.reconnecting {
+			continue
+		}
+
+		newModels, _ := c.fetchModelsSilent()
+		if !c.modelsEqual(newModels) {
+			log.Printf("检测到模型变化，触发更新")
+			c.models = newModels
+			c.notifyModelUpdate(newModels)
+		}
+	}
+}
+
+func (c *Client) fetchModelsSilent() ([]types.ModelInfo, error) {
+	resp, err := http.Get(fmt.Sprintf("%s/v1/models", c.Upstream))
+	if err != nil {
+		log.Printf("获取模型列表失败: %v", err)
+		return []types.ModelInfo{}, err
+	}
+	defer resp.Body.Close()
+
+	var modelsResp types.ModelsResponse
+	if err := json.NewDecoder(resp.Body).Decode(&modelsResp); err != nil {
+		log.Printf("解析模型响应失败: %v", err)
+		return []types.ModelInfo{}, err
+	}
+	return modelsResp.Data, nil
+}
+
+func (c *Client) modelsEqual(newModels []types.ModelInfo) bool {
+	if len(c.models) != len(newModels) {
+		return false
+	}
+
+	oldMap := make(map[string]struct{})
+	for _, m := range c.models {
+		oldMap[m.ID] = struct{}{}
+	}
+
+	for _, m := range newModels {
+		if _, ok := oldMap[m.ID]; !ok {
+			return false
+		}
+		delete(oldMap, m.ID)
+	}
+	return len(oldMap) == 0
+}
+
+func (c *Client) notifyModelUpdate(models []types.ModelInfo) {
+	body, err := json.Marshal(types.ModelUpdateRequest{
+		ClientID: c.ClientID,
+		Models:   models,
+	})
+	if err != nil {
+		log.Printf("序列化模型更新请求失败: %v", err)
+		return
+	}
+
+	updateReq := types.ForwardRequest{
+		Type: types.TypeModelUpdate,
+		Body: body,
+	}
+
+	if err := c.writeJSON(updateReq); err != nil {
+		log.Printf("发送模型更新通知失败: %v", err)
 	}
 }
