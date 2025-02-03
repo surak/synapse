@@ -25,6 +25,7 @@ type Client struct {
 	ServerURL       string
 	ClientID        string
 	WSAuthKey       string
+	UpstreamAPIKey  string
 	models          []types.ModelInfo
 	conn            *websocket.Conn
 	mu              sync.Mutex
@@ -47,7 +48,17 @@ func NewClient(upstream, serverURL string) *Client {
 }
 
 func (c *Client) fetchModels() error {
-	resp, err := http.Get(fmt.Sprintf("%s/v1/models", c.Upstream))
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s/v1/models", c.Upstream), nil)
+	if err != nil {
+		log.Printf("创建模型请求失败: %v", err)
+		return err
+	}
+	
+	if c.UpstreamAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.UpstreamAPIKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("获取模型列表失败: %v", err)
 		return err
@@ -170,6 +181,10 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 			log.Printf("发送错误响应失败: %v", err)
 		}
 		return
+	}
+
+	if c.UpstreamAPIKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.UpstreamAPIKey)
 	}
 
 	// 设置请求头
@@ -369,7 +384,17 @@ func (c *Client) startModelSync() {
 }
 
 func (c *Client) fetchModelsSilent() ([]types.ModelInfo, error) {
-	resp, err := http.Get(fmt.Sprintf("%s/v1/models", c.Upstream))
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s/v1/models", c.Upstream), nil)
+	if err != nil {
+		log.Printf("创建模型请求失败: %v", err)
+		return []types.ModelInfo{}, err
+	}
+
+	if c.UpstreamAPIKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.UpstreamAPIKey)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		log.Printf("获取模型列表失败: %v", err)
 		return []types.ModelInfo{}, err
