@@ -33,6 +33,7 @@ type Client struct {
 	models          []types.ModelInfo
 	conn            *websocket.Conn
 	mu              sync.Mutex
+	reconnMu        sync.Mutex
 	reconnecting    bool
 	closing         bool
 	heartbeatTicker *time.Ticker
@@ -321,12 +322,14 @@ func (c *Client) reconnect() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.reconnecting || c.closing {
+	if c.closing {
 		return
 	}
 
-	c.reconnecting = true
-	defer func() { c.reconnecting = false }()
+	c.setReconnecting(true)
+	defer func() {
+		c.setReconnecting(false)
+	}()
 
 	retryWait := 1 * time.Second
 	maxRetryWait := 30 * time.Second
@@ -348,10 +351,7 @@ func (c *Client) reconnect() {
 
 func (c *Client) startHeartbeat() {
 	for range c.heartbeatTicker.C {
-		if c.closing {
-			return
-		}
-		if c.reconnecting {
+		if c.closing || c.isReconnecting() {
 			continue
 		}
 
@@ -380,10 +380,7 @@ func (c *Client) Close() {
 
 func (c *Client) startModelSync() {
 	for range c.syncTicker.C {
-		if c.closing {
-			return
-		}
-		if c.reconnecting {
+		if c.closing || c.isReconnecting() {
 			continue
 		}
 
@@ -467,12 +464,27 @@ func (c *Client) Shutdown() {
 	})
 }
 
+func (c *Client) isReconnecting() bool {
+	c.reconnMu.Lock()
+	defer c.reconnMu.Unlock()
+	return c.reconnecting
+}
+
+func (c *Client) setReconnecting(reconnecting bool) {
+	c.reconnMu.Lock()
+	defer c.reconnMu.Unlock()
+	c.reconnecting = reconnecting
+}
+
 func (c *Client) WaitForShutdown() {
 	sigChan := make(chan os.Signal, 2)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	select {
 	case <-sigChan:
+		if c.isReconnecting() {
+			break
+		}
 		log.Println("通知服务器更新模型列表")
 		c.notifyModelUpdate([]types.ModelInfo{})
 	case <-c.shutdownSignal:
@@ -482,6 +494,9 @@ func (c *Client) WaitForShutdown() {
 	// 新增强制关闭处理
 	select {
 	case <-sigChan:
+		if c.isReconnecting() {
+			break
+		}
 		log.Println("强制关闭，通知服务器中断请求")
 		// 发送强制关闭通知
 		body, _ := json.Marshal(types.ForceShutdownRequest{ClientID: c.ClientID})
@@ -497,8 +512,8 @@ func (c *Client) WaitForShutdown() {
 		os.Exit(1)
 	case <-c.waitForRequests():
 		log.Println("所有请求处理完成，安全退出")
-		os.Exit(0)
 	}
+	os.Exit(0)
 }
 
 func (c *Client) trackRequest(start bool) {
