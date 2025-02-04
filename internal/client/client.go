@@ -42,13 +42,15 @@ type Client struct {
 	shutdownSignal  chan struct{}
 	shutdownOnce    sync.Once
 	activeRequests  int64 // 原子计数器
+	Version         string
 }
 
-func NewClient(upstream, serverURL string) *Client {
+func NewClient(upstream, serverURL string, version string) *Client {
 	return &Client{
 		Upstream:        upstream,
 		ServerURL:       serverURL,
 		ClientID:        generateClientID(),
+		Version:         version,
 		cancelMap:       make(map[string]context.CancelFunc),
 		heartbeatTicker: time.NewTicker(15 * time.Second),
 		syncTicker:      time.NewTicker(30 * time.Second),
@@ -106,6 +108,7 @@ func (c *Client) Connect() error {
 	registration := types.ClientRegistration{
 		ClientID: c.ClientID,
 		Models:   c.models,
+		Version:  c.Version,
 	}
 	if err := conn.WriteJSON(registration); err != nil {
 		log.Printf("发送注册信息失败: %v", err)
@@ -128,6 +131,17 @@ func (c *Client) handleRequests() {
 			if c.closing {
 				return
 			}
+
+			// 添加版本错误处理
+			if closeErr, ok := err.(*websocket.CloseError); ok {
+				switch closeErr.Code {
+				case 4000:
+					log.Fatalf("版本错误: %s", closeErr.Text)
+				case 4001:
+					log.Fatalf("版本不匹配: %s", closeErr.Text)
+				}
+			}
+
 			log.Printf("连接异常: %v，尝试重新连接...", err)
 			go c.reconnect()
 			return

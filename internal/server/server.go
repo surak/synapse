@@ -26,6 +26,7 @@ type Server struct {
 	apiAuthKey      string            // 新增API鉴权密钥
 	wsAuthKey       string            // 新增WebSocket鉴权密钥
 	requestClient   map[string]string // 新增：requestID -> clientID
+	version         string            // 新增版本号字段
 }
 
 type Client struct {
@@ -40,7 +41,7 @@ func (c *Client) writeJSON(v any) error {
 	return c.conn.WriteJSON(v)
 }
 
-func NewServer(apiAuthKey, wsAuthKey string) *Server {
+func NewServer(apiAuthKey, wsAuthKey string, version string) *Server {
 	return &Server{
 		clients:         make(map[string]*Client),
 		modelClients:    make(map[string][]string),
@@ -53,6 +54,7 @@ func NewServer(apiAuthKey, wsAuthKey string) *Server {
 			},
 		},
 		requestClient: make(map[string]string),
+		version:       version, // 设置版本号
 	}
 }
 
@@ -86,6 +88,22 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		conn.Close()
 		return
 	}
+
+	// 版本检查逻辑
+	if registration.Version == "" {
+		log.Printf("客户端 %s 未提供版本号，拒绝连接", registration.ClientID)
+		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4000, "Version required"))
+		conn.Close()
+		return
+	}
+
+	if registration.Version != s.version {
+		log.Printf("客户端版本不匹配 (client: %s, server: %s)", registration.Version, s.version)
+		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4001, fmt.Sprintf("Client version %s does not match server version %s", registration.Version, s.version)))
+		conn.Close()
+		return
+	}
+
 	log.Printf("新客户端连接: %s, 注册模型数: %d", registration.ClientID, len(registration.Models))
 
 	s.mu.Lock()

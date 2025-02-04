@@ -22,6 +22,7 @@ type ModelsResponse struct {
 type ClientRegistration struct {
 	ClientID string      `json:"client_id"`
 	Models   []ModelInfo `json:"models"`
+	Version  string      `json:"version"`
 }
 
 // ForwardRequest 转发请求的结构
