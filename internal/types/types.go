@@ -44,6 +44,7 @@ const (
 	TypePong      = 3 // Pong响应
 	TypeClientClose = 4 // 客户端关闭请求
 	TypeModelUpdate = 5 // 模型更新类型
+	TypeUnregister  = 6 // 新增：取消注册类型
 )
 
 type ForwardResponse struct {
@@ -60,4 +61,9 @@ type ForwardResponse struct {
 type ModelUpdateRequest struct {
 	ClientID string      `json:"client_id"`
 	Models   []ModelInfo `json:"models"`
+}
+
+// 添加取消注册请求结构
+type UnregisterRequest struct {
+	ClientID string `json:"client_id"`
 }

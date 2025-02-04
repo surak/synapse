@@ -11,7 +11,11 @@ import (
 	"log"
 	"mime"
 	"net/http"
+	"os"
+	"os/signal"
 	"sync"
+	"sync/atomic"
+	"syscall"
 	"time"
 
 	"bufio"
@@ -34,6 +38,9 @@ type Client struct {
 	heartbeatTicker *time.Ticker
 	cancelMap       map[string]context.CancelFunc
 	syncTicker      *time.Ticker
+	shutdownSignal  chan struct{}
+	shutdownOnce    sync.Once
+	activeRequests  int64 // 原子计数器
 }
 
 func NewClient(upstream, serverURL string) *Client {
@@ -44,6 +51,7 @@ func NewClient(upstream, serverURL string) *Client {
 		cancelMap:       make(map[string]context.CancelFunc),
 		heartbeatTicker: time.NewTicker(15 * time.Second),
 		syncTicker:      time.NewTicker(30 * time.Second),
+		shutdownSignal:  make(chan struct{}),
 	}
 }
 
@@ -53,7 +61,7 @@ func (c *Client) fetchModels() error {
 		log.Printf("创建模型请求失败: %v", err)
 		return err
 	}
-	
+
 	if c.UpstreamAPIKey != "" {
 		req.Header.Set("Authorization", "Bearer "+c.UpstreamAPIKey)
 	}
@@ -108,6 +116,7 @@ func (c *Client) Connect() error {
 	go c.startHeartbeat()
 	go c.startModelSync()
 	go c.handleRequests()
+	go c.WaitForShutdown()
 	return nil
 }
 
@@ -148,6 +157,9 @@ func (c *Client) writeJSON(v any) error {
 }
 
 func (c *Client) forwardRequest(req types.ForwardRequest) {
+	c.trackRequest(true)
+	defer c.trackRequest(false)
+
 	// 创建可取消的context
 	ctx, cancel := context.WithCancel(context.Background())
 	c.mu.Lock()
@@ -169,6 +181,7 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, req.Method, upstreamURL, bytes.NewReader(req.Body))
+	// httpReq, err := http.NewRequest(req.Method, upstreamURL, bytes.NewReader(req.Body))
 	if err != nil {
 		log.Printf("创建上游请求失败: %v", err)
 		errResp := types.ForwardResponse{
@@ -446,4 +459,54 @@ func (c *Client) notifyModelUpdate(models []types.ModelInfo) {
 	if err := c.writeJSON(updateReq); err != nil {
 		log.Printf("发送模型更新通知失败: %v", err)
 	}
+}
+
+func (c *Client) Shutdown() {
+	c.shutdownOnce.Do(func() {
+		close(c.shutdownSignal)
+	})
+}
+
+func (c *Client) WaitForShutdown() {
+	sigChan := make(chan os.Signal, 2)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+
+	select {
+	case <-sigChan:
+		log.Println("通知服务器更新模型列表")
+		// Clear the model list
+		// Avoid server dispatch more request to this client
+		c.notifyModelUpdate([]types.ModelInfo{})
+	case <-c.shutdownSignal:
+		return
+	}
+
+	// 等待第二次信号或完成
+	select {
+	case <-sigChan:
+		log.Println("强制关闭...")
+		os.Exit(1)
+	case <-c.waitForRequests():
+		log.Println("所有请求处理完成，安全退出")
+		os.Exit(0)
+	}
+}
+
+func (c *Client) trackRequest(start bool) {
+	if start {
+		atomic.AddInt64(&c.activeRequests, 1)
+	} else {
+		atomic.AddInt64(&c.activeRequests, -1)
+	}
+}
+
+func (c *Client) waitForRequests() <-chan struct{} {
+	ch := make(chan struct{})
+	go func() {
+		for atomic.LoadInt64(&c.activeRequests) > 0 {
+			time.Sleep(100 * time.Millisecond)
+		}
+		close(ch)
+	}()
+	return ch
 }

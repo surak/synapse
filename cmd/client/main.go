@@ -29,6 +29,7 @@ func main() {
 			time.Sleep(5 * time.Second)
 			continue
 		}
+
 		select {} // 阻塞主线程直到连接断开
 	}
 }

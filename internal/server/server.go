@@ -143,6 +143,15 @@ func (s *Server) handleClientResponses(clientID string, client *Client) {
 				return
 			}
 			s.handleModelUpdate(updateReq)
+		case types.TypeUnregister:
+			var unregisterReq types.UnregisterRequest
+			if err := json.Unmarshal(msg.Body, &unregisterReq); err != nil {
+				log.Printf("解析取消注册请求失败: %v", err)
+				return
+			}
+			log.Printf("收到客户端 %s 的取消注册请求", unregisterReq.ClientID)
+			s.unregisterClient(unregisterReq.ClientID)
+			return
 		default:
 			log.Printf("未知消息类型: %d", msg.Type)
 		}
