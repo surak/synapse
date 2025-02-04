@@ -38,13 +38,14 @@ type ForwardRequest struct {
 
 // ResponseType 表示响应类型
 const (
-	TypeNormal    = 0 // 普通响应
-	TypeStream    = 1 // 流式响应
-	TypeHeartbeat = 2 // 心跳类型
-	TypePong      = 3 // Pong响应
-	TypeClientClose = 4 // 客户端关闭请求
-	TypeModelUpdate = 5 // 模型更新类型
-	TypeUnregister  = 6 // 新增：取消注册类型
+	TypeNormal        = 0 // 普通响应
+	TypeStream        = 1 // 流式响应
+	TypeHeartbeat     = 2 // 心跳类型
+	TypePong          = 3 // Pong响应
+	TypeClientClose   = 4 // 客户端关闭请求
+	TypeModelUpdate   = 5 // 模型更新类型
+	TypeUnregister    = 6 // 新增：取消注册类型
+	TypeForceShutdown = 7 // 新增强制关闭类型
 )
 
 type ForwardResponse struct {
@@ -65,5 +66,10 @@ type ModelUpdateRequest struct {
 
 // 添加取消注册请求结构
 type UnregisterRequest struct {
+	ClientID string `json:"client_id"`
+}
+
+// 添加强制关闭请求结构
+type ForceShutdownRequest struct {
 	ClientID string `json:"client_id"`
 }

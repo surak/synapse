@@ -474,16 +474,25 @@ func (c *Client) WaitForShutdown() {
 	select {
 	case <-sigChan:
 		log.Println("通知服务器更新模型列表")
-		// Clear the model list
-		// Avoid server dispatch more request to this client
 		c.notifyModelUpdate([]types.ModelInfo{})
 	case <-c.shutdownSignal:
 		return
 	}
 
-	// 等待第二次信号或完成
+	// 新增强制关闭处理
 	select {
 	case <-sigChan:
+		log.Println("强制关闭，通知服务器中断请求")
+		// 发送强制关闭通知
+		body, _ := json.Marshal(types.ForceShutdownRequest{ClientID: c.ClientID})
+		forceReq := types.ForwardRequest{
+			Type: types.TypeForceShutdown,
+			Body: body,
+		}
+		if err := c.writeJSON(forceReq); err != nil {
+			log.Printf("发送强制关闭通知失败: %v", err)
+		}
+
 		log.Println("强制关闭...")
 		os.Exit(1)
 	case <-c.waitForRequests():

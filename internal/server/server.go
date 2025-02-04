@@ -23,8 +23,9 @@ type Server struct {
 	upgrader        websocket.Upgrader
 	pendingRequests map[string]chan types.ForwardResponse
 	reqMu           sync.RWMutex
-	apiAuthKey      string // 新增API鉴权密钥
-	wsAuthKey       string // 新增WebSocket鉴权密钥
+	apiAuthKey      string            // 新增API鉴权密钥
+	wsAuthKey       string            // 新增WebSocket鉴权密钥
+	requestClient   map[string]string // 新增：requestID -> clientID
 }
 
 type Client struct {
@@ -51,6 +52,7 @@ func NewServer(apiAuthKey, wsAuthKey string) *Server {
 				return true
 			},
 		},
+		requestClient: make(map[string]string),
 	}
 }
 
@@ -152,6 +154,13 @@ func (s *Server) handleClientResponses(clientID string, client *Client) {
 			log.Printf("收到客户端 %s 的取消注册请求", unregisterReq.ClientID)
 			s.unregisterClient(unregisterReq.ClientID)
 			return
+		case types.TypeForceShutdown:
+			var forceReq types.ForceShutdownRequest
+			if err := json.Unmarshal(msg.Body, &forceReq); err != nil {
+				log.Printf("解析强制关闭请求失败: %v", err)
+				return
+			}
+			s.handleForceShutdown(forceReq)
 		default:
 			log.Printf("未知消息类型: %d", msg.Type)
 		}
@@ -291,9 +300,15 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 	client := s.clients[clientID]
 	s.mu.RUnlock()
 
+	// 在选择客户端并发送请求后添加：
+	s.reqMu.Lock()
+	s.requestClient[requestID] = clientID
+	s.reqMu.Unlock()
+
 	// 等待响应
 	defer func() {
 		s.reqMu.Lock()
+		delete(s.requestClient, requestID)
 		if ch, exists := s.pendingRequests[requestID]; exists {
 			delete(s.pendingRequests, requestID)
 			close(ch)
@@ -428,6 +443,37 @@ func (s *Server) handleModelUpdate(update types.ModelUpdateRequest) {
 	}
 
 	log.Printf("已更新客户端 %s 的模型列表，当前模型数: %d", update.ClientID, len(update.Models))
+}
+
+func (s *Server) handleForceShutdown(req types.ForceShutdownRequest) {
+	s.reqMu.Lock()
+	defer s.reqMu.Unlock()
+
+	// 查找所有属于该客户端的请求
+	var requestsToCancel []string
+	for requestID, clientID := range s.requestClient {
+		if clientID == req.ClientID {
+			requestsToCancel = append(requestsToCancel, requestID)
+		}
+	}
+
+	// 发送取消响应并清理
+	for _, requestID := range requestsToCancel {
+		if ch, exists := s.pendingRequests[requestID]; exists {
+			// 发送超时响应
+			ch <- types.ForwardResponse{
+				RequestID:  requestID,
+				StatusCode: http.StatusGatewayTimeout,
+				Body:       []byte("Upstream client force shutdown"),
+				Type:       types.TypeNormal,
+				Done:       true,
+			}
+			close(ch)
+			delete(s.pendingRequests, requestID)
+			delete(s.requestClient, requestID)
+		}
+	}
+	log.Printf("已强制关闭客户端 %s 的 %d 个待处理请求", req.ClientID, len(requestsToCancel))
 }
 
 func (s *Server) Start(host string, port string) error {
