@@ -293,7 +293,16 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 	clients := s.modelClients[req.Model]
 	if len(clients) == 0 {
 		s.mu.RUnlock()
-		http.Error(w, "Model not found", http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"code":    "bad_request",
+				"message": fmt.Sprintf("Unsupported model: %s", req.Model),
+				"type":    "invalid_request_error",
+				"param":   nil,
+			},
+		})
 		return
 	}
 	clientID := clients[rand.Intn(len(clients))]
