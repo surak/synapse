@@ -510,9 +510,92 @@ func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", "synapse-client"))
 }
 
+func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/html")
+	w.Write([]byte(`<html>
+	<head>
+		<title>Synapse Server</title>
+	</head>
+	<body>
+		<h1>Synapse Server</h1>
+		<p>Version: ` + s.version + `</p>
+	</body>
+</html>`))
+}
+
+func (s *Server) handleGetServerVersion(w http.ResponseWriter, r *http.Request) {
+	w.Write([]byte(s.version))
+}
+
+func (s *Server) oneKeyScript(w http.ResponseWriter, r *http.Request) {
+	// 获取协议和主机信息
+	proto := "http"
+	if r.TLS != nil {
+		proto = "https"
+	}
+	// 处理反向代理的情况
+	if forwardedProto := r.Header.Get("X-Forwarded-Proto"); forwardedProto != "" {
+		proto = forwardedProto
+	}
+
+	// 构建WebSocket协议
+	wsProto := "ws"
+	if proto == "https" {
+		wsProto = "wss"
+	}
+
+	// 获取完整主机地址
+	host := r.Host
+	serverURL := fmt.Sprintf("%s://%s/ws", wsProto, host)
+
+	// 生成Bash脚本模板
+	script := fmt.Sprintf(`#!/usr/bin/env bash
+set -euo pipefail
+
+function installClient() {
+	# 自动安装客户端脚本
+	echo "下载客户端..."
+	if command -v curl >/dev/null 2>&1; then
+		curl -L -o synapse-client "%s://%s/getclient"
+	elif command -v wget >/dev/null 2>&1; then
+		wget -O synapse-client "%s://%s/getclient"
+	else
+		echo "错误: 需要 curl 或 wget 来下载客户端"
+		exit 1
+	fi
+}
+
+if [ -f "synapse-client" ]; then
+	clientVersion=$(./synapse-client --version)
+	if [ "$clientVersion" != "%s" ]; then
+		installClient
+	fi
+else
+	installClient
+fi
+
+chmod +x ./synapse-client
+echo "启动客户端连接服务器: %s"
+./synapse-client --server-url "%s" "$@"
+`, proto, host, proto, host, s.version, serverURL, serverURL)
+
+	// 设置响应头
+	w.Header().Set("Content-Type", "text/x-shellscript")
+	w.Header().Set("Content-Disposition", "attachment; filename=install-client.sh")
+
+	// 发送脚本内容
+	if _, err := io.WriteString(w, script); err != nil {
+		log.Printf("发送一键安装脚本失败: %v", err)
+		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+	}
+}
+
 func (s *Server) Start(host string, port string) error {
 	http.HandleFunc("/ws", s.handleWebSocket)
 	http.HandleFunc("/v1/", s.handleAPIRequest)
 	http.HandleFunc("/getclient", s.handleGetClient)
+	http.HandleFunc("/", s.handleIndex)
+	http.HandleFunc("/version", s.handleGetServerVersion)
+	http.HandleFunc("/run", s.oneKeyScript)
 	return http.ListenAndServe(host+":"+port, nil)
 }
