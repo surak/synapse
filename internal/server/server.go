@@ -556,7 +556,7 @@ set -euo pipefail
 wsUrl="%s"
 serverUrl="%s"
 serverVersion="%s"
-synapseClientPath="/tmp/synapse-client"
+synapseClientPath="$HOME/.local/bin/synapse-client"
 
 function installClient() {
 	# 自动安装客户端脚本
