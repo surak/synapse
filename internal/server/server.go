@@ -569,6 +569,7 @@ function installClient() {
 		echo "错误: 需要 curl 或 wget 来下载客户端"
 		exit 1
 	fi
+	echo "下载客户端到 $synapseClientPath"
 }
 
 if [ -f "$synapseClientPath" ]; then
