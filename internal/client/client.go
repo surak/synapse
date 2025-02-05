@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"syscall"
@@ -103,7 +104,7 @@ func (c *Client) Connect() error {
 		return err
 	}
 	c.conn = conn
-	log.Printf("成功连接到服务器 %s", wsURL)
+	log.Printf("成功连接到服务器 %s", strings.Replace(wsURL, c.WSAuthKey, "...", -1))
 
 	registration := types.ClientRegistration{
 		ClientID: c.ClientID,
