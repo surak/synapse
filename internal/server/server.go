@@ -546,38 +546,44 @@ func (s *Server) oneKeyScript(w http.ResponseWriter, r *http.Request) {
 
 	// 获取完整主机地址
 	host := r.Host
-	serverURL := fmt.Sprintf("%s://%s/ws", wsProto, host)
+	serverURL := fmt.Sprintf("%s://%s", proto, host)
+	wsURL := fmt.Sprintf("%s://%s/ws", wsProto, host)
 
 	// 生成Bash脚本模板
 	script := fmt.Sprintf(`#!/usr/bin/env bash
 set -euo pipefail
 
+wsUrl="%s"
+serverUrl="%s"
+serverVersion="%s"
+synapseClientPath="/tmp/synapse-client"
+
 function installClient() {
 	# 自动安装客户端脚本
 	echo "下载客户端..."
 	if command -v curl >/dev/null 2>&1; then
-		curl -L -o synapse-client "%s://%s/getclient"
+		curl -L -o "$synapseClientPath" "$serverUrl/getclient"
 	elif command -v wget >/dev/null 2>&1; then
-		wget -O synapse-client "%s://%s/getclient"
+		wget -O "$synapseClientPath" "$serverUrl/getclient"
 	else
 		echo "错误: 需要 curl 或 wget 来下载客户端"
 		exit 1
 	fi
 }
 
-if [ -f "synapse-client" ]; then
-	clientVersion=$(./synapse-client --version)
-	if [ "$clientVersion" != "%s" ]; then
+if [ -f "$synapseClientPath" ]; then
+	clientVersion=$("$synapseClientPath" --version)
+	if [ "$clientVersion" != "$serverVersion" ]; then
 		installClient
 	fi
 else
 	installClient
 fi
 
-chmod +x ./synapse-client
-echo "启动客户端连接服务器: %s"
-./synapse-client --server-url "%s" "$@"
-`, proto, host, proto, host, s.version, serverURL, serverURL)
+chmod +x "$synapseClientPath"
+echo "启动客户端连接服务器: $wsUrl"
+"$synapseClientPath" --server-url "$wsUrl" "$@"
+`, wsURL, serverURL, s.version)
 
 	// 设置响应头
 	w.Header().Set("Content-Type", "text/x-shellscript")
