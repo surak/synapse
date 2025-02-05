@@ -574,8 +574,9 @@ function installClient() {
 }
 
 if [ -f "$synapseClientPath" ]; then
-	clientVersion=$("$synapseClientPath" --version)
+	clientVersion=$("$synapseClientPath" --version | awk -F': ' '{print $2}' | tr -d '\n')
 	if [ "$clientVersion" != "$serverVersion" ]; then
+		echo "客户端版本不匹配，重新安装"
 		installClient
 	fi
 else
