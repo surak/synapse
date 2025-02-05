@@ -17,16 +17,17 @@ import (
 )
 
 type Server struct {
-	clients         map[string]*Client
-	modelClients    map[string][]string // model -> []clientID
-	mu              sync.RWMutex
-	upgrader        websocket.Upgrader
-	pendingRequests map[string]chan types.ForwardResponse
-	reqMu           sync.RWMutex
-	apiAuthKey      string            // 新增API鉴权密钥
-	wsAuthKey       string            // 新增WebSocket鉴权密钥
-	requestClient   map[string]string // 新增：requestID -> clientID
-	version         string            // 新增版本号字段
+	clients          map[string]*Client
+	modelClients     map[string][]string // model -> []clientID
+	mu               sync.RWMutex
+	upgrader         websocket.Upgrader
+	pendingRequests  map[string]chan types.ForwardResponse
+	reqMu            sync.RWMutex
+	apiAuthKey       string            // 新增API鉴权密钥
+	wsAuthKey        string            // 新增WebSocket鉴权密钥
+	requestClient    map[string]string // 新增：requestID -> clientID
+	version          string            // 新增版本号字段
+	clientBinaryPath string            // 新增客户端二进制文件路径
 }
 
 type Client struct {
@@ -41,7 +42,7 @@ func (c *Client) writeJSON(v any) error {
 	return c.conn.WriteJSON(v)
 }
 
-func NewServer(apiAuthKey, wsAuthKey string, version string) *Server {
+func NewServer(apiAuthKey, wsAuthKey string, version string, clientBinaryPath string) *Server {
 	return &Server{
 		clients:         make(map[string]*Client),
 		modelClients:    make(map[string][]string),
@@ -53,8 +54,9 @@ func NewServer(apiAuthKey, wsAuthKey string, version string) *Server {
 				return true
 			},
 		},
-		requestClient: make(map[string]string),
-		version:       version, // 设置版本号
+		requestClient:    make(map[string]string),
+		version:          version,          // 设置版本号
+		clientBinaryPath: clientBinaryPath, // 新增初始化
 	}
 }
 
@@ -503,8 +505,14 @@ func (s *Server) handleForceShutdown(req types.ForceShutdownRequest) {
 	log.Printf("已强制关闭客户端 %s 的 %d 个待处理请求", req.ClientID, len(requestsToCancel))
 }
 
+func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, s.clientBinaryPath)
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", "synapse-client"))
+}
+
 func (s *Server) Start(host string, port string) error {
 	http.HandleFunc("/ws", s.handleWebSocket)
 	http.HandleFunc("/v1/", s.handleAPIRequest)
+	http.HandleFunc("/getclient", s.handleGetClient)
 	return http.ListenAndServe(host+":"+port, nil)
 }
