@@ -561,7 +561,7 @@ synapseClientPath="$HOME/.local/bin/synapse-client"
 function installClient() {
 	# 自动安装客户端脚本
 	echo "下载客户端..."
-	mkdir -p $(basename "$synapseClientPath")
+	mkdir -p "$(basename "$synapseClientPath")"
 	if command -v curl >/dev/null 2>&1; then
 		curl -L -o "$synapseClientPath" "$serverUrl/getclient"
 	elif command -v wget >/dev/null 2>&1; then
