@@ -42,7 +42,7 @@ type Client struct {
 	syncTicker      *time.Ticker
 	shutdownSignal  chan struct{}
 	shutdownOnce    sync.Once
-	activeRequests  int64 // 原子计数器
+	activeRequests  int64 // Atomic counter
 	Version         string
 }
 
@@ -62,7 +62,7 @@ func NewClient(upstream, serverURL string, version string) *Client {
 func (c *Client) fetchModels() error {
 	req, err := http.NewRequest("GET", fmt.Sprintf("%s/v1/models", c.Upstream), nil)
 	if err != nil {
-		log.Printf("创建模型请求失败: %v", err)
+		log.Printf("Failed to create model request: %v", err)
 		return err
 	}
 
@@ -72,17 +72,17 @@ func (c *Client) fetchModels() error {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("获取模型列表失败: %v", err)
+		log.Printf("Failed to get model list: %v", err)
 		return err
 	}
 	defer resp.Body.Close()
 
 	var modelsResp types.ModelsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&modelsResp); err != nil {
-		log.Printf("解析模型响应失败: %v", err)
+		log.Printf("Failed to parse model response: %v", err)
 		return err
 	}
-	log.Printf("获取到 %d 个模型", len(modelsResp.Data))
+	log.Printf("Got %d models", len(modelsResp.Data))
 	c.models = modelsResp.Data
 	return nil
 }
@@ -92,7 +92,7 @@ func (c *Client) Connect() error {
 		return err
 	}
 
-	// 直接使用配置的服务器URL
+	// Use the configured server URL directly
 	wsURL := c.ServerURL
 	if c.WSAuthKey != "" {
 		wsURL += "?ws_auth_key=" + c.WSAuthKey
@@ -100,11 +100,11 @@ func (c *Client) Connect() error {
 
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
 	if err != nil {
-		log.Printf("连接服务器失败: %v", err)
+		log.Printf("Failed to connect to server: %v", err)
 		return err
 	}
 	c.conn = conn
-	log.Printf("成功连接到服务器 %s", strings.Replace(wsURL, c.WSAuthKey, "...", -1))
+	log.Printf("Successfully connected to server %s", strings.Replace(wsURL, c.WSAuthKey, "...", -1))
 
 	registration := types.ClientRegistration{
 		ClientID: c.ClientID,
@@ -112,11 +112,11 @@ func (c *Client) Connect() error {
 		Version:  c.Version,
 	}
 	if err := conn.WriteJSON(registration); err != nil {
-		log.Printf("发送注册信息失败: %v", err)
+		log.Printf("Failed to send registration information: %v", err)
 		conn.Close()
 		return err
 	}
-	log.Printf("已发送客户端注册信息，ID: %s", c.ClientID)
+	log.Printf("Sent client registration information, ID: %s", c.ClientID)
 
 	go c.startHeartbeat()
 	go c.startModelSync()
@@ -133,35 +133,35 @@ func (c *Client) handleRequests() {
 				return
 			}
 
-			// 添加版本错误处理
+			// Add version error handling
 			if closeErr, ok := err.(*websocket.CloseError); ok {
 				switch closeErr.Code {
 				case 4000:
-					log.Fatalf("版本错误: %s", closeErr.Text)
+					log.Fatalf("Version error: %s", closeErr.Text)
 				case 4001:
-					log.Fatalf("版本不匹配: %s", closeErr.Text)
+					log.Fatalf("Version mismatch: %s", closeErr.Text)
 				}
 			}
 
-			log.Printf("连接异常: %v，尝试重新连接...", err)
+			log.Printf("Connection error: %v, attempting to reconnect...", err)
 			go c.reconnect()
 			return
 		}
 
-		// 处理不同类型请求
+		// Handle different types of requests
 		switch req.Type {
 		case types.TypePong:
 		case types.TypeNormal:
 			go c.forwardRequest(req)
-		case types.TypeClientClose: // 新增处理关闭请求
+		case types.TypeClientClose: // Add handling of close requests
 			c.mu.Lock()
 			cancel, exists := c.cancelMap[req.RequestID]
 			c.mu.Unlock()
 			if exists {
-				cancel() // 取消对应的请求
+				cancel() // Cancel the corresponding request
 			}
 		default:
-			log.Printf("未知请求类型: %d", req.Type)
+			log.Printf("Unknown request type: %d", req.Type)
 		}
 	}
 }
@@ -176,13 +176,13 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 	c.trackRequest(true)
 	defer c.trackRequest(false)
 
-	// 创建可取消的context
+	// Create a cancellable context
 	ctx, cancel := context.WithCancel(context.Background())
 	c.mu.Lock()
 	c.cancelMap[req.RequestID] = cancel
 	c.mu.Unlock()
 
-	// 在函数返回时清理
+	// Clean up on function return
 	defer func() {
 		c.mu.Lock()
 		delete(c.cancelMap, req.RequestID)
@@ -197,9 +197,8 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, req.Method, upstreamURL, bytes.NewReader(req.Body))
-	// httpReq, err := http.NewRequest(req.Method, upstreamURL, bytes.NewReader(req.Body))
 	if err != nil {
-		log.Printf("创建上游请求失败: %v", err)
+		log.Printf("Failed to create upstream request: %v", err)
 		errResp := types.ForwardResponse{
 			RequestID:  req.RequestID,
 			StatusCode: http.StatusInternalServerError,
@@ -207,7 +206,7 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 			Type:       types.TypeNormal,
 		}
 		if err := c.writeJSON(errResp); err != nil {
-			log.Printf("发送错误响应失败: %v", err)
+			log.Printf("Failed to send error response: %v", err)
 		}
 		return
 	}
@@ -216,18 +215,18 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 		httpReq.Header.Set("Authorization", "Bearer "+c.UpstreamAPIKey)
 	}
 
-	// 设置请求头
+	// Set request headers
 	for k, v := range req.Header {
 		httpReq.Header[k] = v
 	}
-	// 确保设置了 Content-Type
+	// Ensure Content-Type is set
 	if httpReq.Header.Get("Content-Type") == "" {
 		httpReq.Header.Set("Content-Type", "application/json")
 	}
 
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
-		log.Printf("上游请求执行失败: %v", err)
+		log.Printf("Upstream request execution failed: %v", err)
 		errResp := types.ForwardResponse{
 			RequestID:  req.RequestID,
 			StatusCode: http.StatusInternalServerError,
@@ -235,7 +234,7 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 			Type:       types.TypeNormal,
 		}
 		if err := c.writeJSON(errResp); err != nil {
-			log.Printf("发送错误响应失败: %v", err)
+			log.Printf("Failed to send error response: %v", err)
 		}
 		return
 	}
@@ -246,7 +245,7 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 	} else {
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
-			log.Printf("读取响应体失败: %v", err)
+			log.Printf("Failed to read response body: %v", err)
 			errResp := types.ForwardResponse{
 				RequestID:  req.RequestID,
 				StatusCode: http.StatusInternalServerError,
@@ -254,12 +253,12 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 				Type:       types.TypeNormal,
 			}
 			if err := c.writeJSON(errResp); err != nil {
-				log.Printf("发送错误响应失败: %v", err)
+				log.Printf("Failed to send error response: %v", err)
 			}
 			return
 		}
 
-		// 创建转发响应结构
+		// Create forward response structure
 		forwardResp := types.ForwardResponse{
 			RequestID:  req.RequestID,
 			StatusCode: resp.StatusCode,
@@ -269,7 +268,7 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 		}
 
 		if err := c.writeJSON(forwardResp); err != nil {
-			log.Printf("发送响应失败: %v", err)
+			log.Printf("Failed to send response: %v", err)
 			return
 		}
 	}
@@ -282,14 +281,14 @@ func (c *Client) handleStreamResponse(reader io.Reader, requestID string, ctx co
 	for scanner.Scan() {
 		select {
 		case <-ctx.Done():
-			log.Printf("请求 %s 已被取消", requestID)
+			log.Printf("Request %s has been cancelled", requestID)
 			return
 		default:
 			line := scanner.Bytes()
 			if bytes.HasPrefix(line, []byte("data: ")) {
 				content := bytes.TrimSpace(line[6:])
 				if bytes.Equal(content, []byte("[DONE]")) {
-					// 发送流结束标记
+					// Send stream end marker
 					doneResp := types.ForwardResponse{
 						RequestID:  requestID,
 						Type:       types.TypeStream,
@@ -297,14 +296,14 @@ func (c *Client) handleStreamResponse(reader io.Reader, requestID string, ctx co
 						StatusCode: http.StatusOK,
 					}
 					if err := c.writeJSON(doneResp); err != nil {
-						log.Printf("发送流结束标记失败: %v", err)
+						log.Printf("Failed to send stream end marker: %v", err)
 					}
 					return
 				}
 
 				buffer.Write(content)
 			}
-			// 当遇到空行时发送一个数据块
+			// Send a chunk of data when an empty line is encountered
 			if len(line) == 0 {
 				if buffer.Len() > 0 {
 					chunk := types.ForwardResponse{
@@ -314,7 +313,7 @@ func (c *Client) handleStreamResponse(reader io.Reader, requestID string, ctx co
 						Body:       buffer.Bytes(),
 					}
 					if err := c.writeJSON(chunk); err != nil {
-						log.Printf("发送流数据块失败: %v", err)
+						log.Printf("Failed to send stream data chunk: %v", err)
 						return
 					}
 					buffer.Reset()
@@ -327,7 +326,7 @@ func (c *Client) handleStreamResponse(reader io.Reader, requestID string, ctx co
 func generateClientID() string {
 	b := make([]byte, 8)
 	if _, err := rand.Read(b); err != nil {
-		log.Printf("生成客户端ID失败: %v", err)
+		log.Printf("Failed to generate client ID: %v", err)
 		return "fallback-id"
 	}
 	return hex.EncodeToString(b)
@@ -350,16 +349,16 @@ func (c *Client) reconnect() {
 	maxRetryWait := 30 * time.Second
 
 	for {
-		log.Printf("尝试重新连接...")
+		log.Printf("Attempting to reconnect...")
 		if err := c.Connect(); err == nil {
-			log.Printf("重连成功")
+			log.Printf("Reconnected successfully")
 			return
 		}
 
 		if retryWait < maxRetryWait {
 			retryWait *= 2
 		}
-		log.Printf("重连失败，%v 后重试...", retryWait)
+		log.Printf("Reconnection failed, retrying in %v...", retryWait)
 		time.Sleep(retryWait)
 	}
 }
@@ -375,8 +374,8 @@ func (c *Client) startHeartbeat() {
 			Type:      types.TypeHeartbeat,
 		}
 		if err := c.writeJSON(heartbeat); err != nil {
-			log.Printf("发送心跳失败: %v", err)
-			go c.reconnect() // 添加重连触发
+			log.Printf("Failed to send heartbeat: %v", err)
+			go c.reconnect() // Add reconnection trigger
 			return
 		}
 	}
@@ -401,7 +400,7 @@ func (c *Client) startModelSync() {
 
 		newModels, _ := c.fetchModelsSilent()
 		if !c.modelsEqual(newModels) {
-			log.Printf("检测到模型变化，触发更新")
+			log.Printf("Detected model changes, triggering update")
 			c.models = newModels
 			c.notifyModelUpdate(newModels)
 		}
@@ -411,7 +410,7 @@ func (c *Client) startModelSync() {
 func (c *Client) fetchModelsSilent() ([]types.ModelInfo, error) {
 	req, err := http.NewRequest("GET", fmt.Sprintf("%s/v1/models", c.Upstream), nil)
 	if err != nil {
-		log.Printf("创建模型请求失败: %v", err)
+		log.Printf("Failed to create model request: %v", err)
 		return []types.ModelInfo{}, err
 	}
 
@@ -421,14 +420,14 @@ func (c *Client) fetchModelsSilent() ([]types.ModelInfo, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("获取模型列表失败: %v", err)
+		log.Printf("Failed to get model list: %v", err)
 		return []types.ModelInfo{}, err
 	}
 	defer resp.Body.Close()
 
 	var modelsResp types.ModelsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&modelsResp); err != nil {
-		log.Printf("解析模型响应失败: %v", err)
+		log.Printf("Failed to parse model response: %v", err)
 		return []types.ModelInfo{}, err
 	}
 	return modelsResp.Data, nil
@@ -459,7 +458,7 @@ func (c *Client) notifyModelUpdate(models []types.ModelInfo) {
 		Models:   models,
 	})
 	if err != nil {
-		log.Printf("序列化模型更新请求失败: %v", err)
+		log.Printf("Failed to serialize model update request: %v", err)
 		return
 	}
 
@@ -469,7 +468,7 @@ func (c *Client) notifyModelUpdate(models []types.ModelInfo) {
 	}
 
 	if err := c.writeJSON(updateReq); err != nil {
-		log.Printf("发送模型更新通知失败: %v", err)
+		log.Printf("Failed to send model update notification: %v", err)
 	}
 }
 
@@ -500,33 +499,33 @@ func (c *Client) WaitForShutdown() {
 		if c.isReconnecting() {
 			break
 		}
-		log.Println("通知服务器更新模型列表")
+		log.Println("Notifying server to update model list")
 		c.notifyModelUpdate([]types.ModelInfo{})
 	case <-c.shutdownSignal:
 		return
 	}
 
-	// 新增强制关闭处理
+	// Add force shutdown handling
 	select {
 	case <-sigChan:
 		if c.isReconnecting() {
 			break
 		}
-		log.Println("强制关闭，通知服务器中断请求")
-		// 发送强制关闭通知
+		log.Println("Force shutdown, notifying server to interrupt requests")
+		// Send force shutdown notification
 		body, _ := json.Marshal(types.ForceShutdownRequest{ClientID: c.ClientID})
 		forceReq := types.ForwardRequest{
 			Type: types.TypeForceShutdown,
 			Body: body,
 		}
 		if err := c.writeJSON(forceReq); err != nil {
-			log.Printf("发送强制关闭通知失败: %v", err)
+			log.Printf("Failed to send force shutdown notification: %v", err)
 		}
 
-		log.Println("强制关闭...")
+		log.Println("Forcing shutdown...")
 		os.Exit(1)
 	case <-c.waitForRequests():
-		log.Println("所有请求处理完成，安全退出")
+		log.Println("All requests processed, exiting safely")
 	}
 	os.Exit(0)
 }

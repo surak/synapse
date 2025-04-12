@@ -9,15 +9,15 @@ import (
 	"github.com/zeyugao/synapse/internal/server"
 )
 
-var version = "dev" // 默认值，编译时会被覆盖
+var version = "dev" // Default value, will be overwritten at compile time
 
 func main() {
 	host := flag.String("host", "localhost", "Server host")
 	port := flag.String("port", "8080", "Server port")
-	apiAuthKey := flag.String("api-auth-key", "", "API鉴权密钥")
-	wsAuthKey := flag.String("ws-auth-key", "", "WebSocket注册鉴权密钥")
-	printVersion := flag.Bool("version", false, "打印版本号")
-	clientBinary := flag.String("client-binary", "./client", "客户端二进制文件路径")
+	apiAuthKey := flag.String("api-auth-key", "", "API authentication key")
+	wsAuthKey := flag.String("ws-auth-key", "", "WebSocket registration authentication key")
+	printVersion := flag.Bool("version", false, "Print version number")
+	clientBinary := flag.String("client-binary", "./client", "Client binary file path")
 	flag.Parse()
 
 	if _, err := os.Stat(*clientBinary); os.IsNotExist(err) {

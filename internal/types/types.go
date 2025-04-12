@@ -4,7 +4,7 @@ import (
 	"net/http"
 )
 
-// ModelInfo 存储模型信息
+// ModelInfo stores model information
 type ModelInfo struct {
 	ID      string `json:"id"`
 	Object  string `json:"object"`
@@ -12,20 +12,20 @@ type ModelInfo struct {
 	Owned   string `json:"owned_by"`
 }
 
-// ModelsResponse 上游API返回的模型列表
+// ModelsResponse Model list returned by upstream API
 type ModelsResponse struct {
 	Object string      `json:"object"`
 	Data   []ModelInfo `json:"data"`
 }
 
-// ClientRegistration 客户端注册信息
+// ClientRegistration Client registration information
 type ClientRegistration struct {
 	ClientID string      `json:"client_id"`
 	Models   []ModelInfo `json:"models"`
 	Version  string      `json:"version"`
 }
 
-// ForwardRequest 转发请求的结构
+// ForwardRequest Structure of the forwarded request
 type ForwardRequest struct {
 	Type      int         `json:"type"`
 	RequestID string      `json:"request_id"`
@@ -37,16 +37,16 @@ type ForwardRequest struct {
 	Body      []byte      `json:"body"`
 }
 
-// ResponseType 表示响应类型
+// ResponseType represents the response type
 const (
-	TypeNormal        = 0 // 普通响应
-	TypeStream        = 1 // 流式响应
-	TypeHeartbeat     = 2 // 心跳类型
-	TypePong          = 3 // Pong响应
-	TypeClientClose   = 4 // 客户端关闭请求
-	TypeModelUpdate   = 5 // 模型更新类型
-	TypeUnregister    = 6 // 新增：取消注册类型
-	TypeForceShutdown = 7 // 新增强制关闭类型
+	TypeNormal        = 0 // Normal response
+	TypeStream        = 1 // Streaming response
+	TypeHeartbeat     = 2 // Heartbeat type
+	TypePong          = 3 // Pong response
+	TypeClientClose   = 4 // Client close request
+	TypeModelUpdate   = 5 // Model update type
+	TypeUnregister    = 6 // Add: Unregister type
+	TypeForceShutdown = 7 // Add: Force shutdown type
 )
 
 type ForwardResponse struct {
@@ -54,23 +54,23 @@ type ForwardResponse struct {
 	StatusCode int         `json:"status_code"`
 	Header     http.Header `json:"header"`
 	Body       []byte      `json:"body"`
-	Type       int         `json:"type"` // TypeNormal 或 TypeStream
-	Done       bool        `json:"done"` // 用于流式结束标记
+	Type       int         `json:"type"` // TypeNormal or TypeStream
+	Done       bool        `json:"done"` // Used for stream end marker
 	Timestamp  int64       `json:"timestamp"`
 }
 
-// 添加模型更新请求结构
+// Add model update request structure
 type ModelUpdateRequest struct {
 	ClientID string      `json:"client_id"`
 	Models   []ModelInfo `json:"models"`
 }
 
-// 添加取消注册请求结构
+// Add unregister request structure
 type UnregisterRequest struct {
 	ClientID string `json:"client_id"`
 }
 
-// 添加强制关闭请求结构
+// Add force shutdown request structure
 type ForceShutdownRequest struct {
 	ClientID string `json:"client_id"`
 }

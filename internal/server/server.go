@@ -23,11 +23,11 @@ type Server struct {
 	upgrader         websocket.Upgrader
 	pendingRequests  map[string]chan types.ForwardResponse
 	reqMu            sync.RWMutex
-	apiAuthKey       string            // 新增API鉴权密钥
-	wsAuthKey        string            // 新增WebSocket鉴权密钥
-	requestClient    map[string]string // 新增：requestID -> clientID
-	version          string            // 新增版本号字段
-	clientBinaryPath string            // 新增客户端二进制文件路径
+	apiAuthKey       string
+	wsAuthKey        string
+	requestClient    map[string]string
+	version          string
+	clientBinaryPath string
 }
 
 type Client struct {
@@ -55,8 +55,8 @@ func NewServer(apiAuthKey, wsAuthKey string, version string, clientBinaryPath st
 			},
 		},
 		requestClient:    make(map[string]string),
-		version:          version,          // 设置版本号
-		clientBinaryPath: clientBinaryPath, // 新增初始化
+		version:          version,          // Set version
+		clientBinaryPath: clientBinaryPath, // Add initialization
 	}
 }
 
@@ -67,7 +67,7 @@ func generateRequestID() string {
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
-	// 检查WebSocket鉴权
+	// Check WebSocket authentication
 	if s.wsAuthKey != "" {
 		authKey := r.URL.Query().Get("ws_auth_key")
 		if authKey != s.wsAuthKey {
@@ -78,35 +78,35 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("WebSocket升级失败: %v", err)
+		log.Printf("WebSocket upgrade failed: %v", err)
 		http.Error(w, "Could not upgrade connection", http.StatusInternalServerError)
 		return
 	}
 
-	// 等待客户端注册信息
+	// Wait for client registration information
 	var registration types.ClientRegistration
 	if err := conn.ReadJSON(&registration); err != nil {
-		log.Printf("读取注册信息失败: %v", err)
+		log.Printf("Failed to read registration information: %v", err)
 		conn.Close()
 		return
 	}
 
-	// 版本检查逻辑
+	// Version check logic
 	if registration.Version == "" {
-		log.Printf("客户端 %s 未提供版本号，拒绝连接", registration.ClientID)
+		log.Printf("Client %s did not provide a version number, connection refused", registration.ClientID)
 		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4000, "Version required"))
 		conn.Close()
 		return
 	}
 
 	if registration.Version != s.version {
-		log.Printf("客户端版本不匹配 (client: %s, server: %s)", registration.Version, s.version)
+		log.Printf("Client version mismatch (client: %s, server: %s)", registration.Version, s.version)
 		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4001, fmt.Sprintf("Client version %s does not match server version %s", registration.Version, s.version)))
 		conn.Close()
 		return
 	}
 
-	log.Printf("新客户端连接: %s, 注册模型数: %d", registration.ClientID, len(registration.Models))
+	log.Printf("New client connected: %s, registered models: %d", registration.ClientID, len(registration.Models))
 
 	s.mu.Lock()
 	client := &Client{
@@ -115,13 +115,13 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 	s.clients[registration.ClientID] = client
 
-	// 更新模型到客户端的映射
+	// Update model to client mapping
 	for _, model := range registration.Models {
 		s.modelClients[model.ID] = append(s.modelClients[model.ID], registration.ClientID)
 	}
 	s.mu.Unlock()
 
-	// 添加处理响应的 goroutine
+	// Add goroutine for handling responses
 	go s.handleClientResponses(registration.ClientID, client)
 }
 
@@ -135,7 +135,7 @@ func (s *Server) handleClientResponses(clientID string, client *Client) {
 		var msg types.ForwardResponse
 
 		if err := client.conn.ReadJSON(&msg); err != nil {
-			log.Printf("读取客户端 %s 消息失败: %v", clientID, err)
+			log.Printf("Failed to read client %s message: %v", clientID, err)
 			return
 		}
 
@@ -151,38 +151,38 @@ func (s *Server) handleClientResponses(clientID string, client *Client) {
 			}
 			s.handleForwardResponse(resp)
 		case types.TypeHeartbeat:
-			// 发送pong响应
+			// Send pong response
 			pongReq := types.ForwardRequest{
 				Type: types.TypePong,
 			}
 			if err := client.writeJSON(pongReq); err != nil {
-				log.Printf("发送pong响应失败: %v", err)
+				log.Printf("Failed to send pong response: %v", err)
 			}
 		case types.TypeModelUpdate:
 			var updateReq types.ModelUpdateRequest
 			if err := json.Unmarshal(msg.Body, &updateReq); err != nil {
-				log.Printf("解析模型更新请求失败: %v", err)
+				log.Printf("Failed to parse model update request: %v", err)
 				return
 			}
 			s.handleModelUpdate(updateReq)
 		case types.TypeUnregister:
 			var unregisterReq types.UnregisterRequest
 			if err := json.Unmarshal(msg.Body, &unregisterReq); err != nil {
-				log.Printf("解析取消注册请求失败: %v", err)
+				log.Printf("Failed to parse unregister request: %v", err)
 				return
 			}
-			log.Printf("收到客户端 %s 的取消注册请求", unregisterReq.ClientID)
+			log.Printf("Received unregister request from client %s", unregisterReq.ClientID)
 			s.unregisterClient(unregisterReq.ClientID)
 			return
 		case types.TypeForceShutdown:
 			var forceReq types.ForceShutdownRequest
 			if err := json.Unmarshal(msg.Body, &forceReq); err != nil {
-				log.Printf("解析强制关闭请求失败: %v", err)
+				log.Printf("Failed to parse force shutdown request: %v", err)
 				return
 			}
 			s.handleForceShutdown(forceReq)
 		default:
-			log.Printf("未知消息类型: %d", msg.Type)
+			log.Printf("Unknown message type: %d", msg.Type)
 		}
 	}
 }
@@ -207,17 +207,17 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	// 收集所有唯一的模型并添加客户端计数
+	// Collect all unique models and add client count
 	modelMap := make(map[string]struct {
 		types.ModelInfo
 		ClientCount int `json:"client_count"`
 	})
 
-	// 首先收集所有模型信息
+	// First collect all model information
 	for _, client := range s.clients {
 		for _, model := range client.models {
 			if existing, exists := modelMap[model.ID]; exists {
-				// 如果模型已存在，只更新客户端计数
+				// If the model already exists, only update the client count
 				existing.ClientCount = len(s.modelClients[model.ID])
 				modelMap[model.ID] = existing
 			} else {
@@ -232,7 +232,7 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 		}
 	}
 
-	// 转换为切片
+	// Convert to slice
 	models := make([]struct {
 		types.ModelInfo
 		ClientCount int `json:"client_count"`
@@ -257,7 +257,7 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
-	// 检查API鉴权
+	// Check API authentication
 	if s.apiAuthKey != "" {
 		authHeader := r.Header.Get("Authorization")
 		if authHeader != "Bearer "+s.apiAuthKey {
@@ -271,7 +271,7 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 读取请求体
+	// Read request body
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Error reading request body", http.StatusBadRequest)
@@ -287,16 +287,16 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 生成请求ID
+	// Generate request ID
 	requestID := generateRequestID()
 
-	// 创建响应通道
+	// Create response channel
 	respChan := make(chan types.ForwardResponse, 1)
 	s.reqMu.Lock()
 	s.pendingRequests[requestID] = respChan
 	s.reqMu.Unlock()
 
-	// 构建转发请求
+	// Build forward request
 	req := types.ForwardRequest{
 		Type:      types.TypeNormal,
 		RequestID: requestID,
@@ -308,7 +308,7 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 		Body:      body,
 	}
 
-	// 选择客户端并发送请求
+	// Select client and send request
 	s.mu.RLock()
 	clients := s.modelClients[req.Model]
 	if len(clients) == 0 {
@@ -329,12 +329,12 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 	client := s.clients[clientID]
 	s.mu.RUnlock()
 
-	// 在选择客户端并发送请求后添加：
+	// Add after selecting client and sending request:
 	s.reqMu.Lock()
 	s.requestClient[requestID] = clientID
 	s.reqMu.Unlock()
 
-	// 等待响应
+	// Wait for response
 	defer func() {
 		s.reqMu.Lock()
 		delete(s.requestClient, requestID)
@@ -362,17 +362,17 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(resp.StatusCode)
 			w.Write(resp.Body)
 		} else {
-			// 流式响应
+			// Streaming response
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("Connection", "keep-alive")
 			flusher, _ := w.(http.Flusher)
 
-			// 写入第一个chunk
+			// Write the first chunk
 			fmt.Fprintf(w, "data: %s\n\n", resp.Body)
 			flusher.Flush()
 
-			// 继续处理后续chunks
+			// Continue processing subsequent chunks
 			for {
 				select {
 				case chunk := <-respChan:
@@ -385,26 +385,26 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 						flusher.Flush()
 					}
 				case <-r.Context().Done():
-					// 发送客户端关闭请求
+					// Send client close request
 					closeReq := types.ForwardRequest{
 						Type:      types.TypeClientClose,
 						RequestID: requestID,
 					}
 					if err := client.writeJSON(closeReq); err != nil {
-						log.Printf("发送关闭请求失败: %v", err)
+						log.Printf("Failed to send close request: %v", err)
 					}
 					return
 				}
 			}
 		}
 	case <-r.Context().Done():
-		// 发送客户端关闭请求
+		// Send client close request
 		closeReq := types.ForwardRequest{
 			Type:      types.TypeClientClose,
 			RequestID: requestID,
 		}
 		if err := client.writeJSON(closeReq); err != nil {
-			log.Printf("发送关闭请求失败: %v", err)
+			log.Printf("Failed to send close request: %v", err)
 		}
 		return
 	}
@@ -419,11 +419,11 @@ func (s *Server) unregisterClient(clientID string) {
 		return
 	}
 
-	// 清理模型到客户端的映射
+	// Clean up model to client mapping
 	for _, model := range client.models {
-		// 查找该模型对应的客户端列表
+		// Find the client list corresponding to the model
 		if clients, ok := s.modelClients[model.ID]; ok {
-			// 创建新切片排除当前客户端
+			// Create a new slice excluding the current client
 			newClients := make([]string, 0, len(clients))
 			for _, cid := range clients {
 				if cid != clientID {
@@ -431,7 +431,7 @@ func (s *Server) unregisterClient(clientID string) {
 				}
 			}
 
-			// 更新或删除映射
+			// Update or delete the mapping
 			if len(newClients) > 0 {
 				s.modelClients[model.ID] = newClients
 			} else {
@@ -440,9 +440,9 @@ func (s *Server) unregisterClient(clientID string) {
 		}
 	}
 
-	// 删除客户端记录
+	// Delete client record
 	delete(s.clients, clientID)
-	log.Printf("客户端 %s 已注销，剩余客户端数: %d", clientID, len(s.clients))
+	log.Printf("Client %s unregistered, remaining clients: %d", clientID, len(s.clients))
 }
 
 func (s *Server) handleModelUpdate(update types.ModelUpdateRequest) {
@@ -471,14 +471,14 @@ func (s *Server) handleModelUpdate(update types.ModelUpdateRequest) {
 		s.modelClients[model.ID] = append(s.modelClients[model.ID], update.ClientID)
 	}
 
-	log.Printf("已更新客户端 %s 的模型列表，当前模型数: %d", update.ClientID, len(update.Models))
+	log.Printf("Updated model list for client %s, current number of models: %d", update.ClientID, len(update.Models))
 }
 
 func (s *Server) handleForceShutdown(req types.ForceShutdownRequest) {
 	s.reqMu.Lock()
 	defer s.reqMu.Unlock()
 
-	// 查找所有属于该客户端的请求
+	// Find all requests belonging to the client
 	var requestsToCancel []string
 	for requestID, clientID := range s.requestClient {
 		if clientID == req.ClientID {
@@ -486,10 +486,10 @@ func (s *Server) handleForceShutdown(req types.ForceShutdownRequest) {
 		}
 	}
 
-	// 发送取消响应并清理
+	// Send cancel response and clean up
 	for _, requestID := range requestsToCancel {
 		if ch, exists := s.pendingRequests[requestID]; exists {
-			// 发送超时响应
+			// Send timeout response
 			ch <- types.ForwardResponse{
 				RequestID:  requestID,
 				StatusCode: http.StatusGatewayTimeout,
@@ -502,7 +502,7 @@ func (s *Server) handleForceShutdown(req types.ForceShutdownRequest) {
 			delete(s.requestClient, requestID)
 		}
 	}
-	log.Printf("已强制关闭客户端 %s 的 %d 个待处理请求", req.ClientID, len(requestsToCancel))
+	log.Printf("Forcibly closed %d pending requests for client %s", len(requestsToCancel), req.ClientID)
 }
 
 func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
@@ -513,13 +513,13 @@ func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/html")
 	w.Write([]byte(`<html>
-	<head>
-		<title>Synapse Server</title>
-	</head>
-	<body>
-		<h1>Synapse Server</h1>
-		<p>Version: ` + s.version + `</p>
-	</body>
+    <head>
+        <title>Synapse Server</title>
+    </head>
+    <body>
+        <h1>Synapse Server</h1>
+        <p>Version: ` + s.version + `</p>
+    </body>
 </html>`))
 }
 
@@ -528,28 +528,28 @@ func (s *Server) handleGetServerVersion(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) oneKeyScript(w http.ResponseWriter, r *http.Request) {
-	// 获取协议和主机信息
+	// Get protocol and host information
 	proto := "http"
 	if r.TLS != nil {
 		proto = "https"
 	}
-	// 处理反向代理的情况
+	// Handle reverse proxy cases
 	if forwardedProto := r.Header.Get("X-Forwarded-Proto"); forwardedProto != "" {
 		proto = forwardedProto
 	}
 
-	// 构建WebSocket协议
+	// Build WebSocket protocol
 	wsProto := "ws"
 	if proto == "https" {
 		wsProto = "wss"
 	}
 
-	// 获取完整主机地址
+	// Get full host address
 	host := r.Host
 	serverURL := fmt.Sprintf("%s://%s", proto, host)
 	wsURL := fmt.Sprintf("%s://%s/ws", wsProto, host)
 
-	// 生成Bash脚本模板
+	// Generate Bash script template
 	script := fmt.Sprintf(`#!/usr/bin/env bash
 set -xeuo pipefail
 
@@ -559,42 +559,42 @@ serverVersion="%s"
 synapseClientPath="$HOME/.local/bin/synapse-client"
 
 function installClient() {
-	# 自动安装客户端脚本
-	echo "下载客户端..."
-	mkdir -p "$(dirname "$synapseClientPath")"
-	if command -v curl >/dev/null 2>&1; then
-		curl -L -o "$synapseClientPath" "$serverUrl/getclient"
-	elif command -v wget >/dev/null 2>&1; then
-		wget -O "$synapseClientPath" "$serverUrl/getclient"
-	else
-		echo "错误: 需要 curl 或 wget 来下载客户端"
-		exit 1
-	fi
-	echo "下载客户端到 $synapseClientPath"
+    # Automatically install client script
+    echo "Downloading client..."
+    mkdir -p "$(dirname "$synapseClientPath")"
+    if command -v curl >/dev/null 2>&1; then
+        curl -L -o "$synapseClientPath" "$serverUrl/getclient"
+    elif command -v wget >/dev/null 2>&1; then
+        wget -O "$synapseClientPath" "$serverUrl/getclient"
+    else
+        echo "Error: curl or wget is required to download the client"
+        exit 1
+    fi
+    echo "Downloaded client to $synapseClientPath"
 }
 
 if [ -f "$synapseClientPath" ]; then
-	clientVersion=$("$synapseClientPath" --version | awk -F': ' '{print $2}' | tr -d '\n')
-	if [ "$clientVersion" != "$serverVersion" ]; then
-		echo "客户端版本不匹配，重新安装"
-		installClient
-	fi
+    clientVersion=$("$synapseClientPath" --version | awk -F': ' '{print $2}' | tr -d '\n')
+    if [ "$clientVersion" != "$serverVersion" ]; then
+        echo "Client version mismatch, reinstalling"
+        installClient
+    fi
 else
-	installClient
+    installClient
 fi
 
 chmod +x "$synapseClientPath"
-echo "启动客户端连接服务器: $wsUrl"
+echo "Starting client to connect to server: $wsUrl"
 exec "$synapseClientPath" --server-url "$wsUrl" "$@"
 `, wsURL, serverURL, s.version)
 
-	// 设置响应头
+	// Set response headers
 	w.Header().Set("Content-Type", "text/x-shellscript")
 	w.Header().Set("Content-Disposition", "attachment; filename=install-client.sh")
 
-	// 发送脚本内容
+	// Send script content
 	if _, err := io.WriteString(w, script); err != nil {
-		log.Printf("发送一键安装脚本失败: %v", err)
+		log.Printf("Failed to send one-key installation script: %v", err)
 		http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 	}
 }
