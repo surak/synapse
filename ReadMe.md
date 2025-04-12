@@ -107,9 +107,15 @@ curl http://your-synapse-server/run | bash -s -- --upstream "http://127.0.0.1:80
 ```
 
 This will:
-1. Download the client binary
+1. Download the client binary to `$HOME/.local/bin/synapse-client`
 2. Configure it to connect to your server with parameters
 3. Start running the client
+
+**Some Notes:**
+- The script automatically installs the client to `$HOME/.local/bin/synapse-client`
+- The WebSocket URL (`--server-url`) is automatically derived from the server you access the script from
+- Version compatibility between client and server is checked automatically
+- You can pass additional parameters after `bash -s --` which will be forwarded to the client
 
 ## API Usage
 
