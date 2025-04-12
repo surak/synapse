@@ -134,3 +134,29 @@ curl http://synapse-server:8080/v1/chat/completions \
 ## License
 
 MIT
+
+## Why name synapse
+
+```
+Considering that the main functionality of this project is to proxy and load balance AI model requests, it can be named:
+
+"ModelProxy" or "AIModelProxy"
+
+If you want a more creative name, you could consider:
+
+1. "Neuron" - Just like neurons transmit signals in the brain, this program is responsible for forwarding AI model requests.
+2. "Synapse" - A neural synapse, responsible for the connection between neurons, perfectly aligns with the functionality of this program.
+3. "ModelHub" - Emphasizes its role as a hub for centralized management and distribution of AI models.
+4. "AIGateway" - Highlights its role as a gateway for AI services.
+5. "ModelMesh" - Suggests its mesh-like structure and service orchestration capabilities.
+6. "Nexus" - Indicates its role as a connection point and central hub.
+
+Personally, I recommend "Synapse" as the name because:
+1. The name is short and easy to remember.
+2. It matches the functional characteristics of the program.
+3. It implies its critical connecting role in AI services.
+4. It has a technical vibe.
+5. It's easy to register domain names and trademarks.
+
+What do you think of these names? Or do you have other ideas?
+```
