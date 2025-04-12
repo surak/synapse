@@ -14,7 +14,4 @@ clean:
 	rm -rf ./bin
 
 docker:
-	docker build -t registry.vul337.team:5005/gzy/synapse:latest . --build-arg VERSION=$(VERSION)
-	docker tag registry.vul337.team:5005/gzy/synapse:latest registry.vul337.team:5005/ops/devcontainer/synapse:latest
-	docker push registry.vul337.team:5005/gzy/synapse:latest
-	docker push registry.vul337.team:5005/ops/devcontainer/synapse:latest
+	docker build -t synapse:latest . --build-arg VERSION=$(VERSION)
