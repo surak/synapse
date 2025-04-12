@@ -551,7 +551,7 @@ func (s *Server) oneKeyScript(w http.ResponseWriter, r *http.Request) {
 
 	// 生成Bash脚本模板
 	script := fmt.Sprintf(`#!/usr/bin/env bash
-set -euo pipefail
+set -xeuo pipefail
 
 wsUrl="%s"
 serverUrl="%s"
