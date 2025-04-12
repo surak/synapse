@@ -585,7 +585,7 @@ fi
 
 chmod +x "$synapseClientPath"
 echo "启动客户端连接服务器: $wsUrl"
-"$synapseClientPath" --server-url "$wsUrl" "$@"
+exec "$synapseClientPath" --server-url "$wsUrl" "$@"
 `, wsURL, serverURL, s.version)
 
 	// 设置响应头
