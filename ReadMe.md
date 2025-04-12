@@ -51,14 +51,14 @@ Unlike FastChat's worker system (where the OpenAI server needs direct access to 
 git clone https://github.com/zeyugao/synapse
 cd synapse
 make all
+# or docker
+make docker
 ```
 
 ### Docker
 
 ```bash
-git clone https://github.com/zeyugao/synapse
-cd synapse
-docker build -t synapse:latest .
+docker pull ghcr.io/zeyugao/synapse:latest
 ```
 
 ## Usage
