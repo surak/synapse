@@ -211,14 +211,15 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 		return
 	}
 
-	if c.UpstreamAPIKey != "" {
-		httpReq.Header.Set("Authorization", "Bearer "+c.UpstreamAPIKey)
-	}
-
 	// Set request headers
 	for k, v := range req.Header {
 		httpReq.Header[k] = v
 	}
+
+	if c.ApiKey != "" {
+		httpReq.Header.Set("Authorization", "Bearer "+c.ApiKey)
+	}
+
 	// Ensure Content-Type is set
 	if httpReq.Header.Get("Content-Type") == "" {
 		httpReq.Header.Set("Content-Type", "application/json")
