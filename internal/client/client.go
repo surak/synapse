@@ -104,7 +104,11 @@ func (c *Client) Connect() error {
 		return err
 	}
 	c.conn = conn
-	log.Printf("Successfully connected to server %s", strings.Replace(wsURL, c.WSAuthKey, "...", -1))
+	serverToPrint := wsURL
+	if c.WSAuthKey != "" {
+		serverToPrint = strings.Replace(wsURL, c.WSAuthKey, "...", -1)
+	}
+	log.Printf("Successfully connected to server %s", serverToPrint)
 
 	registration := types.ClientRegistration{
 		ClientID: c.ClientID,
