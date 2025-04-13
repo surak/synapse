@@ -92,10 +92,10 @@ Options:
 ```
 
 Options:
-- `--upstream`: URL of the upstream OpenAI-compatible API (default: "http://localhost:8081")
 - `--server-url`: WebSocket URL of the Synapse server (default: "ws://localhost:8080/ws")
+- `--base-url`: Base URL of the upstream OpenAI-compatible API (default: the value in `OPENAI_BASE_URL` environment variable or "http://localhost:8081/v1")
+- `--api-key`: API key for the upstream server (default: the value in `OPENAI_API_KEY` environment variable)
 - `--ws-auth-key`: WebSocket authentication key (must match server's ws-auth-key)
-- `--upstream-api-key`: API key for the upstream server
 - `--version`: Print version information
 
 ### One-Click Client Installation
@@ -103,7 +103,7 @@ Options:
 Synapse provides a simple installation script you can run on any machine:
 
 ```bash
-curl http://your-synapse-server/run | bash -s -- --upstream "http://127.0.0.1:8081" --ws-auth-key 'server-ws-auth-key'
+curl http://your-synapse-server/run | bash -s -- --ws-auth-key 'server-ws-auth-key' --base-url "http://127.0.0.1:8081/v1"  --api-key "sk-123456"
 ```
 
 This will:
