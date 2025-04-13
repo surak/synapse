@@ -10,6 +10,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"strings"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -266,7 +267,13 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if r.URL.Path == "/v1/models" {
+	path := r.URL.Path
+	if strings.HasPrefix(path, "/v1/") {
+		// Remove the /v1 prefix from the path
+		path = strings.TrimPrefix(path, "/v1")
+	}
+
+	if path == "/models" {
 		s.handleModels(w, r)
 		return
 	}
@@ -302,7 +309,7 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 		RequestID: requestID,
 		Model:     modelReq.Model,
 		Method:    r.Method,
-		Path:      r.URL.Path,
+		Path:      path,
 		Query:     r.URL.RawQuery,
 		Header:    r.Header.Clone(),
 		Body:      body,

@@ -26,11 +26,11 @@ import (
 )
 
 type Client struct {
-	Upstream        string
+	BaseUrl         string
 	ServerURL       string
 	ClientID        string
 	WSAuthKey       string
-	UpstreamAPIKey  string
+	ApiKey          string
 	models          []types.ModelInfo
 	conn            *websocket.Conn
 	mu              sync.Mutex
@@ -46,9 +46,9 @@ type Client struct {
 	Version         string
 }
 
-func NewClient(upstream, serverURL string, version string) *Client {
+func NewClient(baseUrl, serverURL string, version string) *Client {
 	return &Client{
-		Upstream:        upstream,
+		BaseUrl:         baseUrl,
 		ServerURL:       serverURL,
 		ClientID:        generateClientID(),
 		Version:         version,
@@ -60,14 +60,14 @@ func NewClient(upstream, serverURL string, version string) *Client {
 }
 
 func (c *Client) fetchModels() error {
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s/v1/models", c.Upstream), nil)
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s/models", c.BaseUrl), nil)
 	if err != nil {
 		log.Printf("Failed to create model request: %v", err)
 		return err
 	}
 
-	if c.UpstreamAPIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.UpstreamAPIKey)
+	if c.ApiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.ApiKey)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
@@ -195,9 +195,9 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 
 	var upstreamURL string
 	if req.Query == "" {
-		upstreamURL = fmt.Sprintf("%s%s", c.Upstream, req.Path)
+		upstreamURL = fmt.Sprintf("%s%s", c.BaseUrl, req.Path)
 	} else {
-		upstreamURL = fmt.Sprintf("%s%s?%s", c.Upstream, req.Path, req.Query)
+		upstreamURL = fmt.Sprintf("%s%s?%s", c.BaseUrl, req.Path, req.Query)
 	}
 
 	httpReq, err := http.NewRequestWithContext(ctx, req.Method, upstreamURL, bytes.NewReader(req.Body))
@@ -413,14 +413,14 @@ func (c *Client) startModelSync() {
 }
 
 func (c *Client) fetchModelsSilent() ([]types.ModelInfo, error) {
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s/v1/models", c.Upstream), nil)
+	req, err := http.NewRequest("GET", fmt.Sprintf("%s/models", c.BaseUrl), nil)
 	if err != nil {
 		log.Printf("Failed to create model request: %v", err)
 		return []types.ModelInfo{}, err
 	}
 
-	if c.UpstreamAPIKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.UpstreamAPIKey)
+	if c.ApiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.ApiKey)
 	}
 
 	resp, err := http.DefaultClient.Do(req)
