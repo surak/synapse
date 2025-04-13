@@ -59,11 +59,13 @@ func NewClient(baseUrl, serverURL string, version string) *Client {
 	}
 }
 
-func (c *Client) fetchModels() error {
+func (c *Client) fetchModels(silent bool) ([]types.ModelInfo, error) {
 	req, err := http.NewRequest("GET", fmt.Sprintf("%s/models", c.BaseUrl), nil)
 	if err != nil {
-		log.Printf("Failed to create model request: %v", err)
-		return err
+		if !silent {
+			log.Printf("Failed to create model request: %v", err)
+		}
+		return nil, err
 	}
 
 	if c.ApiKey != "" {
@@ -72,25 +74,34 @@ func (c *Client) fetchModels() error {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		log.Printf("Failed to get model list: %v", err)
-		return err
+		if !silent {
+			log.Printf("Failed to get model list: %v", err)
+		}
+		return nil, err
 	}
 	defer resp.Body.Close()
 
 	var modelsResp types.ModelsResponse
 	if err := json.NewDecoder(resp.Body).Decode(&modelsResp); err != nil {
-		log.Printf("Failed to parse model response: %v", err)
-		return err
+		if !silent {
+			log.Printf("Failed to parse model response: %v", err)
+		}
+		return nil, err
 	}
-	log.Printf("Got %d models", len(modelsResp.Data))
-	c.models = modelsResp.Data
-	return nil
+
+	if !silent {
+		log.Printf("Got %d models", len(modelsResp.Data))
+	}
+
+	return modelsResp.Data, nil
 }
 
 func (c *Client) Connect() error {
-	if err := c.fetchModels(); err != nil {
+	models, err := c.fetchModels(false)
+	if err != nil {
 		return err
 	}
+	c.models = models
 
 	// Use the configured server URL directly
 	wsURL := c.ServerURL
@@ -403,39 +414,13 @@ func (c *Client) startModelSync() {
 			continue
 		}
 
-		newModels, _ := c.fetchModelsSilent()
+		newModels, _ := c.fetchModels(true)
 		if !c.modelsEqual(newModels) {
 			log.Printf("Detected model changes, triggering update")
 			c.models = newModels
 			c.notifyModelUpdate(newModels)
 		}
 	}
-}
-
-func (c *Client) fetchModelsSilent() ([]types.ModelInfo, error) {
-	req, err := http.NewRequest("GET", fmt.Sprintf("%s/models", c.BaseUrl), nil)
-	if err != nil {
-		log.Printf("Failed to create model request: %v", err)
-		return []types.ModelInfo{}, err
-	}
-
-	if c.ApiKey != "" {
-		req.Header.Set("Authorization", "Bearer "+c.ApiKey)
-	}
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		log.Printf("Failed to get model list: %v", err)
-		return []types.ModelInfo{}, err
-	}
-	defer resp.Body.Close()
-
-	var modelsResp types.ModelsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&modelsResp); err != nil {
-		log.Printf("Failed to parse model response: %v", err)
-		return []types.ModelInfo{}, err
-	}
-	return modelsResp.Data, nil
 }
 
 func (c *Client) modelsEqual(newModels []types.ModelInfo) bool {
