@@ -18,17 +18,18 @@ import (
 )
 
 type Server struct {
-	clients          map[string]*Client
-	modelClients     map[string][]string // model -> []clientID
-	mu               sync.RWMutex
-	upgrader         websocket.Upgrader
-	pendingRequests  map[string]chan types.ForwardResponse
-	reqMu            sync.RWMutex
-	apiAuthKey       string
-	wsAuthKey        string
-	requestClient    map[string]string
-	version          string
-	clientBinaryPath string
+	clients                      map[string]*Client
+	modelClients                 map[string][]string // model -> []clientID
+	mu                           sync.RWMutex
+	upgrader                     websocket.Upgrader
+	pendingRequests              map[string]chan types.ForwardResponse
+	reqMu                        sync.RWMutex
+	apiAuthKey                   string
+	wsAuthKey                    string
+	requestClient                map[string]string
+	version                      string
+	clientBinaryPath             string
+	abortOnClientVersionMismatch bool
 }
 
 type Client struct {
@@ -43,7 +44,7 @@ func (c *Client) writeJSON(v any) error {
 	return c.conn.WriteJSON(v)
 }
 
-func NewServer(apiAuthKey, wsAuthKey string, version string, clientBinaryPath string) *Server {
+func NewServer(apiAuthKey, wsAuthKey string, version string, clientBinaryPath string, abortOnClientVersionMismatch bool) *Server {
 	return &Server{
 		clients:         make(map[string]*Client),
 		modelClients:    make(map[string][]string),
@@ -55,9 +56,10 @@ func NewServer(apiAuthKey, wsAuthKey string, version string, clientBinaryPath st
 				return true
 			},
 		},
-		requestClient:    make(map[string]string),
-		version:          version,          // Set version
-		clientBinaryPath: clientBinaryPath, // Add initialization
+		requestClient:                make(map[string]string),
+		version:                      version,          // Set version
+		clientBinaryPath:             clientBinaryPath, // Add initialization
+		abortOnClientVersionMismatch: abortOnClientVersionMismatch,
 	}
 }
 
@@ -102,9 +104,12 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	if registration.Version != s.version {
 		log.Printf("Client version mismatch (client: %s, server: %s)", registration.Version, s.version)
-		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4001, fmt.Sprintf("Client version %s does not match server version %s", registration.Version, s.version)))
-		conn.Close()
-		return
+		if s.abortOnClientVersionMismatch {
+			log.Printf("Aborting server because client version mismatch")
+			conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4001, fmt.Sprintf("Client version %s does not match server version %s", registration.Version, s.version)))
+			conn.Close()
+			return
+		}
 	}
 
 	log.Printf("New client connected: %s, registered models: %d", registration.ClientID, len(registration.Models))
