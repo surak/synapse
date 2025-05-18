@@ -44,10 +44,11 @@ type Client struct {
 	shutdownOnce    sync.Once
 	activeRequests  int64 // Atomic counter
 	Version         string
+	connClosed      chan struct{} // Channel to signal connection closed
 }
 
 func NewClient(baseUrl, serverURL string, version string) *Client {
-	return &Client{
+	client := &Client{
 		BaseUrl:         baseUrl,
 		ServerURL:       serverURL,
 		ClientID:        generateClientID(),
@@ -56,7 +57,15 @@ func NewClient(baseUrl, serverURL string, version string) *Client {
 		heartbeatTicker: time.NewTicker(15 * time.Second),
 		syncTicker:      time.NewTicker(30 * time.Second),
 		shutdownSignal:  make(chan struct{}),
+		connClosed:      make(chan struct{}),
 	}
+
+	// Start the background goroutines only once
+	go client.heartbeatLoop()
+	go client.modelSyncLoop()
+	go client.WaitForShutdown()
+
+	return client
 }
 
 func (c *Client) fetchModels(silent bool) ([]types.ModelInfo, error) {
@@ -114,6 +123,14 @@ func (c *Client) Connect() error {
 		log.Printf("Failed to connect to server: %v", err)
 		return err
 	}
+
+	// Reset connClosed channel if it was closed
+	select {
+	case <-c.connClosed:
+		c.connClosed = make(chan struct{})
+	default:
+	}
+
 	c.conn = conn
 	serverToPrint := wsURL
 	if c.WSAuthKey != "" {
@@ -133,14 +150,60 @@ func (c *Client) Connect() error {
 	}
 	log.Printf("Sent client registration information, ID: %s", c.ClientID)
 
-	go c.startHeartbeat()
-	go c.startModelSync()
+	// Start the connection handler in a separate goroutine
 	go c.handleRequests()
-	go c.WaitForShutdown()
+
 	return nil
 }
 
+// heartbeatLoop replaces startHeartbeat and runs continuously
+func (c *Client) heartbeatLoop() {
+	for range c.heartbeatTicker.C {
+		if c.closing {
+			return
+		}
+
+		if c.isReconnecting() || c.conn == nil {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		heartbeat := types.ForwardResponse{
+			Timestamp: time.Now().Unix(),
+			Type:      types.TypeHeartbeat,
+		}
+		if err := c.writeJSON(heartbeat); err != nil {
+			log.Printf("Failed to send heartbeat: %v", err)
+			c.signalConnectionClosed()
+			continue
+		}
+	}
+}
+
+// modelSyncLoop replaces startModelSync and runs continuously
+func (c *Client) modelSyncLoop() {
+	for range c.syncTicker.C {
+		if c.closing {
+			return
+		}
+
+		if c.isReconnecting() || c.conn == nil {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+
+		newModels, _ := c.fetchModels(true)
+		if !c.modelsEqual(newModels) {
+			log.Printf("Detected model changes, triggering update")
+			c.models = newModels
+			c.notifyModelUpdate(newModels)
+		}
+	}
+}
+
 func (c *Client) handleRequests() {
+	defer c.signalConnectionClosed()
+
 	for {
 		var req types.ForwardRequest
 		if err := c.conn.ReadJSON(&req); err != nil {
@@ -159,7 +222,6 @@ func (c *Client) handleRequests() {
 			}
 
 			log.Printf("Connection error: %v, attempting to reconnect...", err)
-			go c.reconnect()
 			return
 		}
 
@@ -178,6 +240,17 @@ func (c *Client) handleRequests() {
 		default:
 			log.Printf("Unknown request type: %d", req.Type)
 		}
+	}
+}
+
+// signalConnectionClosed notifies that the connection has been closed
+func (c *Client) signalConnectionClosed() {
+	select {
+	case <-c.connClosed:
+		// Channel already closed
+	default:
+		close(c.connClosed)
+		go c.reconnect() // Trigger reconnection
 	}
 }
 
@@ -361,6 +434,12 @@ func (c *Client) reconnect() {
 		c.setReconnecting(false)
 	}()
 
+	// Close the current connection if it exists
+	if c.conn != nil {
+		c.conn.Close()
+		c.conn = nil
+	}
+
 	retryWait := 1 * time.Second
 	maxRetryWait := 30 * time.Second
 
@@ -379,24 +458,6 @@ func (c *Client) reconnect() {
 	}
 }
 
-func (c *Client) startHeartbeat() {
-	for range c.heartbeatTicker.C {
-		if c.closing || c.isReconnecting() {
-			continue
-		}
-
-		heartbeat := types.ForwardResponse{
-			Timestamp: time.Now().Unix(),
-			Type:      types.TypeHeartbeat,
-		}
-		if err := c.writeJSON(heartbeat); err != nil {
-			log.Printf("Failed to send heartbeat: %v", err)
-			go c.reconnect() // Add reconnection trigger
-			return
-		}
-	}
-}
-
 func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -406,21 +467,6 @@ func (c *Client) Close() {
 	}
 	c.heartbeatTicker.Stop()
 	c.syncTicker.Stop()
-}
-
-func (c *Client) startModelSync() {
-	for range c.syncTicker.C {
-		if c.closing || c.isReconnecting() {
-			continue
-		}
-
-		newModels, _ := c.fetchModels(true)
-		if !c.modelsEqual(newModels) {
-			log.Printf("Detected model changes, triggering update")
-			c.models = newModels
-			c.notifyModelUpdate(newModels)
-		}
-	}
 }
 
 func (c *Client) modelsEqual(newModels []types.ModelInfo) bool {
