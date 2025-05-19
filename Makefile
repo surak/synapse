@@ -14,4 +14,4 @@ clean:
 	rm -rf ./bin
 
 docker:
-	docker build -t synapse:latest . --build-arg VERSION=$(VERSION)
+	docker build -t ghcr.io/zeyugao/synapse:latest . --build-arg VERSION=$(VERSION)
