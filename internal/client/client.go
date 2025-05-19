@@ -257,6 +257,11 @@ func (c *Client) signalConnectionClosed() {
 func (c *Client) writeJSON(v any) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
+	if c.conn == nil {
+		return fmt.Errorf("connection is nil")
+	}
+
 	return c.conn.WriteJSON(v)
 }
 
@@ -532,7 +537,7 @@ func (c *Client) WaitForShutdown() {
 
 	select {
 	case <-sigChan:
-		if c.isReconnecting() {
+		if c.isReconnecting() || c.conn == nil {
 			break
 		}
 		log.Println("Notifying server to update model list")
@@ -544,7 +549,7 @@ func (c *Client) WaitForShutdown() {
 	// Add force shutdown handling
 	select {
 	case <-sigChan:
-		if c.isReconnecting() {
+		if c.isReconnecting() || c.conn == nil {
 			break
 		}
 		log.Println("Force shutdown, notifying server to interrupt requests")
