@@ -14,7 +14,7 @@ var version = "dev" // Default value, will be overwritten at compile time
 func main() {
 	host := flag.String("host", "localhost", "Server host")
 	port := flag.String("port", "8080", "Server port")
-	apiAuthKey := flag.String("api-auth-key", "", "API authentication key")
+	// apiAuthKey := flag.String("api-auth-key", "", "API authentication key") // Removed as per new auth mechanism
 	wsAuthKey := flag.String("ws-auth-key", "", "WebSocket registration authentication key")
 	printVersion := flag.Bool("version", false, "Print version number")
 	clientBinary := flag.String("client-binary", "./client", "Client binary file path")
@@ -30,7 +30,7 @@ func main() {
 		return
 	}
 
-	server := server.NewServer(*apiAuthKey, *wsAuthKey, version, *clientBinary, *abortOnClientVersionMismatch)
+	server := server.NewServer(*wsAuthKey, version, *clientBinary, *abortOnClientVersionMismatch) // apiAuthKey removed
 	log.Printf("Starting server on %s:%s", *host, *port)
 	if err := server.Start(*host, *port); err != nil {
 		log.Fatal(err)

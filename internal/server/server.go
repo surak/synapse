@@ -24,7 +24,7 @@ type Server struct {
 	upgrader                     websocket.Upgrader
 	pendingRequests              map[string]chan types.ForwardResponse
 	reqMu                        sync.RWMutex
-	apiAuthKey                   string
+	// apiAuthKey                   string
 	wsAuthKey                    string
 	requestClient                map[string]string
 	version                      string
@@ -44,12 +44,12 @@ func (c *Client) writeJSON(v any) error {
 	return c.conn.WriteJSON(v)
 }
 
-func NewServer(apiAuthKey, wsAuthKey string, version string, clientBinaryPath string, abortOnClientVersionMismatch bool) *Server {
+func NewServer(wsAuthKey string, version string, clientBinaryPath string, abortOnClientVersionMismatch bool) *Server {
 	return &Server{
 		clients:         make(map[string]*Client),
 		modelClients:    make(map[string][]string),
 		pendingRequests: make(map[string]chan types.ForwardResponse),
-		apiAuthKey:      apiAuthKey,
+		// apiAuthKey:      apiAuthKey,
 		wsAuthKey:       wsAuthKey,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
@@ -262,14 +262,60 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 	json.NewEncoder(w).Encode(response)
 }
 
+var authenticateRequest = func(apiToken string) (bool, error) {
+	if apiToken == "" {
+		return false, nil
+	}
+
+	req, err := http.NewRequest("GET", "https://codebase.helmholtz.cloud/api/v4/user", nil)
+	if err != nil {
+		return false, fmt.Errorf("failed to create request: %w", err)
+	}
+
+	req.Header.Set("Authorization", "Bearer "+apiToken)
+	req.Header.Set("User-Agent", "synapse-server") // It's good practice to set a User-Agent
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("failed to perform request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode == http.StatusOK {
+		return true, nil
+	}
+
+	// You could potentially read the body here for more detailed error logging if needed
+	// For now, any status other than 200 means authentication failed
+	return false, nil
+}
+
 func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
-	// Check API authentication
-	if s.apiAuthKey != "" {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader != "Bearer "+s.apiAuthKey {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+	authHeader := r.Header.Get("Authorization")
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+
+	authenticated, err := authenticateRequest(token)
+	if err != nil {
+		log.Printf("Authentication request failed, treating as unauthorized: %v", err)
+		// Fall through to the standard "not authenticated" handling
+		// which returns the 401 JSON error.
+		// Set authenticated to false to trigger this.
+		authenticated = false
+	}
+
+	if !authenticated {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"error": map[string]interface{}{
+				"message": "You must provide a valid API key. Obtain one from http://helmholtz.cloud",
+				"type":    "invalid_request_error",
+				"param":   nil,
+				"code":    "invalid_api_key",
+			},
+		})
+		return
 	}
 
 	path := r.URL.Path
@@ -613,7 +659,15 @@ exec "$synapseClientPath" --server-url "$wsUrl" "$@"
 
 func (s *Server) Start(host string, port string) error {
 	http.HandleFunc("/ws", s.handleWebSocket)
-	http.HandleFunc("/v1/", s.handleAPIRequest)
+	http.HandleFunc("/v1/", s.handleAPIRequest) // Existing /v1/ route
+	// Ensure /models is also covered by handleAPIRequest or a similar authed handler if needed
+	// If /models was meant to be public, it needs to be explicitly routed before the /v1/ catch-all or have auth handled differently.
+	// For now, assuming /v1/models is the intended path for authenticated model listing.
+	// If /models should remain unauthenticated, its registration needs to be:
+	// http.HandleFunc("/models", s.handleModels)
+	// And this should be placed *before* the /v1/ handler.
+	// However, the original code had /models handled *within* /v1/ logic, implying it should be authenticated.
+
 	http.HandleFunc("/getclient", s.handleGetClient)
 	http.HandleFunc("/", s.handleIndex)
 	http.HandleFunc("/version", s.handleGetServerVersion)
