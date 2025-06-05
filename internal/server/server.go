@@ -26,7 +26,7 @@ type Server struct {
 	reqMu                        sync.RWMutex
 	apiAuthKey                   string
 	wsAuthKey                    string
-	requestClient                map[string]string
+	clientRequests               map[string]map[string]struct{} // clientID -> set of requestIDs
 	version                      string
 	clientBinaryPath             string
 	abortOnClientVersionMismatch bool
@@ -49,6 +49,7 @@ func NewServer(apiAuthKey, wsAuthKey string, version string, clientBinaryPath st
 		clients:         make(map[string]*Client),
 		modelClients:    make(map[string][]string),
 		pendingRequests: make(map[string]chan types.ForwardResponse),
+		clientRequests:  make(map[string]map[string]struct{}),
 		apiAuthKey:      apiAuthKey,
 		wsAuthKey:       wsAuthKey,
 		upgrader: websocket.Upgrader{
@@ -56,9 +57,8 @@ func NewServer(apiAuthKey, wsAuthKey string, version string, clientBinaryPath st
 				return true
 			},
 		},
-		requestClient:                make(map[string]string),
-		version:                      version,          // Set version
-		clientBinaryPath:             clientBinaryPath, // Add initialization
+		version:                      version,
+		clientBinaryPath:             clientBinaryPath,
 		abortOnClientVersionMismatch: abortOnClientVersionMismatch,
 	}
 }
@@ -318,36 +318,93 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 		Body:      body,
 	}
 
-	// Select client and send request
+	// Select client based on model and load balancing
 	s.mu.RLock()
-	clients := s.modelClients[req.Model]
-	if len(clients) == 0 {
-		s.mu.RUnlock()
+	clientIDsForModel, modelSupported := s.modelClients[req.Model]
+
+	var candidateClients []*Client
+	var candidateClientIDs []string
+
+	if modelSupported && len(clientIDsForModel) > 0 {
+		for _, cid := range clientIDsForModel {
+			if c, exists := s.clients[cid]; exists {
+				candidateClients = append(candidateClients, c)
+				candidateClientIDs = append(candidateClientIDs, cid)
+			}
+		}
+	}
+	s.mu.RUnlock()
+
+	if len(candidateClients) == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(map[string]interface{}{
 			"error": map[string]interface{}{
 				"code":    "bad_request",
-				"message": fmt.Sprintf("Unsupported model: %s", req.Model),
+				"message": fmt.Sprintf("Unsupported model or no available clients: %s", req.Model),
 				"type":    "invalid_request_error",
 				"param":   nil,
 			},
 		})
 		return
 	}
-	clientID := clients[rand.Intn(len(clients))]
-	client := s.clients[clientID]
-	s.mu.RUnlock()
 
-	// Add after selecting client and sending request:
+	var bestClient *Client
+	var bestClientID string
+	minLoad := -1
+	var tiedClients []*Client
+	var tiedClientIDs []string
+
+	for i, currentClient := range candidateClients {
+		currentClientID := candidateClientIDs[i]
+		s.reqMu.RLock()
+		load := 0
+		if reqs, ok := s.clientRequests[currentClientID]; ok {
+			load = len(reqs)
+		}
+		s.reqMu.RUnlock()
+
+		if bestClient == nil || load < minLoad {
+			minLoad = load
+			bestClient = currentClient
+			bestClientID = currentClientID
+			tiedClients = []*Client{currentClient}
+			tiedClientIDs = []string{currentClientID}
+		} else if load == minLoad {
+			tiedClients = append(tiedClients, currentClient)
+			tiedClientIDs = append(tiedClientIDs, currentClientID)
+		}
+	}
+
+	if len(tiedClients) > 1 {
+		randomIndex := rand.Intn(len(tiedClients))
+		bestClient = tiedClients[randomIndex]
+		bestClientID = tiedClientIDs[randomIndex]
+	}
+
+	client := bestClient     // Use this client object to send the request
+	clientID := bestClientID // Use this clientID for tracking and logging
+
+	// Add request to client's active requests map
 	s.reqMu.Lock()
-	s.requestClient[requestID] = clientID
+	if s.clientRequests[clientID] == nil {
+		s.clientRequests[clientID] = make(map[string]struct{})
+	}
+	s.clientRequests[clientID][requestID] = struct{}{}
 	s.reqMu.Unlock()
 
 	// Wait for response
+	// The clientID variable from the outer scope (bestClientID) is captured by this defer.
 	defer func() {
 		s.reqMu.Lock()
-		delete(s.requestClient, requestID)
+		// Remove request from the client's active request set
+		if reqs, ok := s.clientRequests[clientID]; ok {
+			delete(reqs, requestID)
+			if len(reqs) == 0 {
+				delete(s.clientRequests, clientID)
+			}
+		}
+		// Clean up pendingRequests
 		if ch, exists := s.pendingRequests[requestID]; exists {
 			delete(s.pendingRequests, requestID)
 			close(ch)
@@ -422,18 +479,15 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) unregisterClient(clientID string) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	client, exists := s.clients[clientID]
 	if !exists {
+		s.mu.Unlock()
 		return
 	}
 
 	// Clean up model to client mapping
 	for _, model := range client.models {
-		// Find the client list corresponding to the model
 		if clients, ok := s.modelClients[model.ID]; ok {
-			// Create a new slice excluding the current client
 			newClients := make([]string, 0, len(clients))
 			for _, cid := range clients {
 				if cid != clientID {
@@ -441,7 +495,6 @@ func (s *Server) unregisterClient(clientID string) {
 				}
 			}
 
-			// Update or delete the mapping
 			if len(newClients) > 0 {
 				s.modelClients[model.ID] = newClients
 			} else {
@@ -450,9 +503,16 @@ func (s *Server) unregisterClient(clientID string) {
 		}
 	}
 
-	// Delete client record
 	delete(s.clients, clientID)
-	log.Printf("Client %s unregistered, remaining clients: %d", clientID, len(s.clients))
+	currentClientCount := len(s.clients)
+	s.mu.Unlock()
+
+	// Clean up clientRequests associated with this client
+	s.reqMu.Lock()
+	delete(s.clientRequests, clientID)
+	s.reqMu.Unlock()
+
+	log.Printf("Client %s unregistered, remaining clients: %d", clientID, currentClientCount)
 }
 
 func (s *Server) handleModelUpdate(update types.ModelUpdateRequest) {
@@ -488,18 +548,21 @@ func (s *Server) handleForceShutdown(req types.ForceShutdownRequest) {
 	s.reqMu.Lock()
 	defer s.reqMu.Unlock()
 
-	// Find all requests belonging to the client
 	var requestsToCancel []string
-	for requestID, clientID := range s.requestClient {
-		if clientID == req.ClientID {
+	if clientActiveRequests, clientExists := s.clientRequests[req.ClientID]; clientExists {
+		for requestID := range clientActiveRequests {
 			requestsToCancel = append(requestsToCancel, requestID)
 		}
+	}
+
+	if len(requestsToCancel) == 0 {
+		log.Printf("No pending requests found to forcibly close for client %s", req.ClientID)
+		return
 	}
 
 	// Send cancel response and clean up
 	for _, requestID := range requestsToCancel {
 		if ch, exists := s.pendingRequests[requestID]; exists {
-			// Send timeout response
 			ch <- types.ForwardResponse{
 				RequestID:  requestID,
 				StatusCode: http.StatusGatewayTimeout,
@@ -509,7 +572,13 @@ func (s *Server) handleForceShutdown(req types.ForceShutdownRequest) {
 			}
 			close(ch)
 			delete(s.pendingRequests, requestID)
-			delete(s.requestClient, requestID)
+		}
+		// Remove from clientRequests for this specific client (req.ClientID) and this requestID
+		if reqsForClient, ok := s.clientRequests[req.ClientID]; ok {
+			delete(reqsForClient, requestID)
+			if len(reqsForClient) == 0 {
+				delete(s.clientRequests, req.ClientID)
+			}
 		}
 	}
 	log.Printf("Forcibly closed %d pending requests for client %s", len(requestsToCancel), req.ClientID)
