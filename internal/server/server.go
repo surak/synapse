@@ -194,19 +194,17 @@ func (s *Server) handleClientResponses(clientID string, client *Client) {
 }
 
 func (s *Server) handleForwardResponse(resp types.ForwardResponse) {
-	s.reqMu.RLock()
+	s.reqMu.Lock()
 	respChan, exists := s.pendingRequests[resp.RequestID]
-	s.reqMu.RUnlock()
 
 	if exists {
 		respChan <- resp
 		if (resp.Type == types.TypeStream && resp.Done) || resp.Type == types.TypeNormal {
-			s.reqMu.Lock()
 			delete(s.pendingRequests, resp.RequestID)
 			close(respChan)
-			s.reqMu.Unlock()
 		}
 	}
+	s.reqMu.Unlock()
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
