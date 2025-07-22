@@ -108,7 +108,8 @@ func (c *Client) fetchModels(silent bool) ([]types.ModelInfo, error) {
 func (c *Client) Connect() error {
 	models, err := c.fetchModels(false)
 	if err != nil {
-		return err
+		log.Printf("Failed to fetch models during initial connection, using empty model list: %v", err)
+		models = []types.ModelInfo{}
 	}
 	c.models = models
 
