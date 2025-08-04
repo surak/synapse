@@ -10,6 +10,7 @@ import (
 	"log"
 	"math/rand"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 
@@ -585,8 +586,15 @@ func (s *Server) handleForceShutdown(req types.ForceShutdownRequest) {
 }
 
 func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {
-	http.ServeFile(w, r, s.clientBinaryPath)
+	// Check if client binary exists
+	if _, err := os.Stat(s.clientBinaryPath); os.IsNotExist(err) {
+		log.Printf("Client binary not found at %s", s.clientBinaryPath)
+		http.Error(w, "Client binary not available", http.StatusNotFound)
+		return
+	}
+
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", "synapse-client"))
+	http.ServeFile(w, r, s.clientBinaryPath)
 }
 
 func (s *Server) handleIndex(w http.ResponseWriter, r *http.Request) {
@@ -607,6 +615,13 @@ func (s *Server) handleGetServerVersion(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) oneKeyScript(w http.ResponseWriter, r *http.Request) {
+	// Check if client binary exists
+	if _, err := os.Stat(s.clientBinaryPath); os.IsNotExist(err) {
+		log.Printf("Client binary not found at %s", s.clientBinaryPath)
+		http.Error(w, "Client binary not available, cannot generate installation script", http.StatusServiceUnavailable)
+		return
+	}
+
 	// Get protocol and host information
 	proto := "http"
 	if r.TLS != nil {
