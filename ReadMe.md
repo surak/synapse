@@ -72,7 +72,7 @@ docker pull ghcr.io/zeyugao/synapse:latest
 Or with docker
 
 ```bash
-docker run -p 8080:8080 ghcr.io/zeyugao/synapse:latest /server [options]
+docker run -p 8080:8080 ghcr.io/zeyugao/synapse:latest server [options]
 ```
 
 Options:
