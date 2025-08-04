@@ -8,5 +8,5 @@ COPY . .
 ARG VERSION=dev
 RUN make -j VERSION=${VERSION}
 
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM scratch
 COPY --from=build /go/src/app/bin/server /go/src/app/bin/client /usr/bin/
