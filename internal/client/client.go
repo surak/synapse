@@ -100,6 +100,9 @@ func (c *Client) fetchModels(silent bool) ([]types.ModelInfo, error) {
 
 	if !silent {
 		log.Printf("Got %d models", len(modelsResp.Data))
+		for _, model := range modelsResp.Data {
+			log.Printf("Model: %s", model.ID)
+		}
 	}
 
 	return modelsResp.Data, nil
@@ -196,6 +199,10 @@ func (c *Client) modelSyncLoop() {
 		newModels, _ := c.fetchModels(true)
 		if !c.modelsEqual(newModels) {
 			log.Printf("Detected model changes, triggering update")
+			log.Printf("Updated model list (%d models):", len(newModels))
+			for _, model := range newModels {
+				log.Printf("  - %s", model.ID)
+			}
 			c.models = newModels
 			c.notifyModelUpdate(newModels)
 		}
