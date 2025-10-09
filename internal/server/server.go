@@ -678,6 +678,10 @@ exec "$synapseClientPath" --server-url "$wsUrl" "$@"
 	}
 }
 
+func (s *Server) handleDocs(w http.ResponseWriter, r *http.Request) {
+	http.ServeFile(w, r, "internal/server/docs.html")
+}
+
 func (s *Server) Start(host string, port string) error {
 	http.HandleFunc("/ws", s.handleWebSocket)
 	http.HandleFunc("/v1/", s.handleAPIRequest)
@@ -685,5 +689,9 @@ func (s *Server) Start(host string, port string) error {
 	http.HandleFunc("/", s.handleIndex)
 	http.HandleFunc("/version", s.handleGetServerVersion)
 	http.HandleFunc("/run", s.oneKeyScript)
+	http.HandleFunc("/docs", s.handleDocs)
+	http.HandleFunc("/openapi.json", func(w http.ResponseWriter, r *http.Request) {
+		http.ServeFile(w, r, "internal/server/openapi.json")
+	})
 	return http.ListenAndServe(host+":"+port, nil)
 }

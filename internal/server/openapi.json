@@ -1,0 +1,184 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "Synapse Server API",
+    "version": "1.0.0",
+    "description": "API for a proxy server that forwards requests to connected clients based on the requested model."
+  },
+  "paths": {
+    "/v1/models": {
+      "get": {
+        "summary": "List Models",
+        "description": "Lists the currently available models, and provides basic information about each one such as the owner and availability.",
+        "operationId": "listModels",
+        "responses": {
+          "200": {
+            "description": "A list of models.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "object": {
+                      "type": "string",
+                      "example": "list"
+                    },
+                    "data": {
+                      "type": "array",
+                      "items": {
+                        "$ref": "#/components/schemas/Model"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/chat/completions": {
+      "post": {
+        "summary": "Create Chat Completion",
+        "description": "Creates a model response for the given chat conversation.",
+        "operationId": "createChatCompletion",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateChatCompletionRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Successful response.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreateChatCompletionResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Model": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "example": "model-id-0"
+          },
+          "object": {
+            "type": "string",
+            "example": "model"
+          },
+          "created": {
+            "type": "integer",
+            "example": 1677610602
+          },
+          "owned_by": {
+            "type": "string",
+            "example": "organization-owner"
+          },
+          "client_count": {
+            "type": "integer",
+            "description": "The number of clients currently serving this model."
+          }
+        }
+      },
+      "CreateChatCompletionRequest": {
+        "type": "object",
+        "properties": {
+          "model": {
+            "type": "string",
+            "description": "The model to use for the completion."
+          },
+          "messages": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "role": {
+                  "type": "string",
+                  "enum": ["user", "assistant", "system"]
+                },
+                "content": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "stream": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": ["model", "messages"]
+      },
+      "CreateChatCompletionResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "object": {
+            "type": "string"
+          },
+          "created": {
+            "type": "integer"
+          },
+          "model": {
+            "type": "string"
+          },
+          "choices": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "index": {
+                  "type": "integer"
+                },
+                "message": {
+                  "type": "object",
+                  "properties": {
+                    "role": {
+                      "type": "string"
+                    },
+                    "content": {
+                      "type": "string"
+                    }
+                  }
+                },
+                "finish_reason": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "usage": {
+            "type": "object",
+            "properties": {
+              "prompt_tokens": {
+                "type": "integer"
+              },
+              "completion_tokens": {
+                "type": "integer"
+              },
+              "total_tokens": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}
