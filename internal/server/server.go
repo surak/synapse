@@ -11,14 +11,18 @@ import (
 	"math/rand"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gorilla/websocket"
 	"github.com/zeyugao/synapse/internal/types"
 	pb "github.com/zeyugao/synapse/internal/types/proto"
 	"google.golang.org/protobuf/proto"
 )
+
+const responseChannelBuffer = 8
 
 type Server struct {
 	clients                      map[string]*Client
@@ -33,12 +37,18 @@ type Server struct {
 	version                      string
 	clientBinaryPath             string
 	abortOnClientVersionMismatch bool
+	clientMsgPool                sync.Pool
+	serverMsgPool                sync.Pool
+	pongFrame                    []byte
+	modelsCache                  []byte
+	modelsCacheDirty             bool
 }
 
 type Client struct {
-	conn   *websocket.Conn
-	models []*types.ModelInfo
-	mu     sync.Mutex
+	conn           *websocket.Conn
+	models         []*types.ModelInfo
+	mu             sync.Mutex
+	activeRequests int64
 }
 
 func (c *Client) writeProto(msg proto.Message) error {
@@ -52,8 +62,26 @@ func (c *Client) writeProto(msg proto.Message) error {
 	return c.conn.WriteMessage(websocket.BinaryMessage, data)
 }
 
+func (c *Client) writeRaw(frame []byte) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.conn.WriteMessage(websocket.BinaryMessage, frame)
+}
+
+func (c *Client) incrementActive() {
+	atomic.AddInt64(&c.activeRequests, 1)
+}
+
+func (c *Client) decrementActive() {
+	atomic.AddInt64(&c.activeRequests, -1)
+}
+
+func (c *Client) loadActive() int64 {
+	return atomic.LoadInt64(&c.activeRequests)
+}
+
 func NewServer(apiAuthKey, wsAuthKey string, version string, clientBinaryPath string, abortOnClientVersionMismatch bool) *Server {
-	return &Server{
+	server := &Server{
 		clients:         make(map[string]*Client),
 		modelClients:    make(map[string][]string),
 		pendingRequests: make(map[string]chan *types.ForwardResponse),
@@ -68,7 +96,30 @@ func NewServer(apiAuthKey, wsAuthKey string, version string, clientBinaryPath st
 		version:                      version,
 		clientBinaryPath:             clientBinaryPath,
 		abortOnClientVersionMismatch: abortOnClientVersionMismatch,
+		modelsCacheDirty:             true,
 	}
+
+	server.clientMsgPool = sync.Pool{
+		New: func() any {
+			return &types.ClientMessage{}
+		},
+	}
+
+	server.serverMsgPool = sync.Pool{
+		New: func() any {
+			return &types.ServerMessage{}
+		},
+	}
+
+	frame, err := proto.Marshal(&types.ServerMessage{
+		Message: &pb.ServerMessage_Pong{Pong: &types.Pong{}},
+	})
+	if err != nil {
+		log.Fatalf("failed to precompute pong frame: %v", err)
+	}
+	server.pongFrame = frame
+
+	return server
 }
 
 func generateRequestID() string {
@@ -77,14 +128,15 @@ func generateRequestID() string {
 	return hex.EncodeToString(b)
 }
 
-func readClientMessage(conn *websocket.Conn) (*types.ClientMessage, error) {
+func (s *Server) readClientMessage(conn *websocket.Conn) (*types.ClientMessage, error) {
 	_, data, err := conn.ReadMessage()
 	if err != nil {
 		return nil, err
 	}
 
-	msg := &types.ClientMessage{}
+	msg := s.getClientMessage()
 	if err := proto.Unmarshal(data, msg); err != nil {
+		s.putClientMessage(msg)
 		return nil, err
 	}
 	return msg, nil
@@ -107,7 +159,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	initialMsg, err := readClientMessage(conn)
+	initialMsg, err := s.readClientMessage(conn)
 	if err != nil {
 		log.Printf("Failed to read registration information: %v", err)
 		conn.Close()
@@ -119,6 +171,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Client did not send registration as first message, connection refused")
 		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4000, "Registration required"))
 		conn.Close()
+		s.putClientMessage(initialMsg)
 		return
 	}
 
@@ -129,6 +182,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Client %s did not provide a version number, connection refused", clientID)
 		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4000, "Version required"))
 		conn.Close()
+		s.putClientMessage(initialMsg)
 		return
 	}
 
@@ -138,17 +192,18 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			log.Printf("Aborting server because client version mismatch")
 			conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4001, fmt.Sprintf("Client version %s does not match server version %s", version, s.version)))
 			conn.Close()
+			s.putClientMessage(initialMsg)
 			return
 		}
 	}
 
-	models := registration.GetModels()
+	models := cloneModelInfos(registration.GetModels())
 	log.Printf("New client connected: %s, registered models: %d", clientID, len(models))
 
 	s.mu.Lock()
 	client := &Client{
 		conn:   conn,
-		models: append([]*types.ModelInfo(nil), models...),
+		models: models,
 	}
 	s.clients[clientID] = client
 
@@ -159,7 +214,10 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 		}
 		s.modelClients[model.GetId()] = append(s.modelClients[model.GetId()], clientID)
 	}
+	s.modelsCacheDirty = true
 	s.mu.Unlock()
+
+	s.putClientMessage(initialMsg)
 
 	// Add goroutine for handling responses
 	go s.handleClientResponses(clientID, client)
@@ -172,7 +230,7 @@ func (s *Server) handleClientResponses(clientID string, client *Client) {
 	}()
 
 	for {
-		msg, err := readClientMessage(client.conn)
+		msg, err := s.readClientMessage(client.conn)
 		if err != nil {
 			log.Printf("Failed to read client %s message: %v", clientID, err)
 			return
@@ -180,38 +238,33 @@ func (s *Server) handleClientResponses(clientID string, client *Client) {
 
 		switch payload := msg.Message.(type) {
 		case *pb.ClientMessage_ForwardResponse:
-			if payload.ForwardResponse == nil {
-				continue
+			if payload.ForwardResponse != nil {
+				s.handleForwardResponse(cloneForwardResponse(payload.ForwardResponse))
 			}
-			s.handleForwardResponse(payload.ForwardResponse)
 		case *pb.ClientMessage_Heartbeat:
-			if err := client.writeProto(&types.ServerMessage{
-				Message: &pb.ServerMessage_Pong{
-					Pong: &types.Pong{},
-				},
-			}); err != nil {
+			if err := client.writeRaw(s.pongFrame); err != nil {
 				log.Printf("Failed to send pong response: %v", err)
 			}
 		case *pb.ClientMessage_ModelUpdate:
-			if payload.ModelUpdate == nil {
-				continue
+			if payload.ModelUpdate != nil {
+				s.handleModelUpdate(payload.ModelUpdate)
 			}
-			s.handleModelUpdate(payload.ModelUpdate)
 		case *pb.ClientMessage_Unregister:
-			if payload.Unregister == nil {
-				continue
+			if payload.Unregister != nil {
+				log.Printf("Received unregister request from client %s", payload.Unregister.GetClientId())
+				s.unregisterClient(payload.Unregister.GetClientId())
+				s.putClientMessage(msg)
+				return
 			}
-			log.Printf("Received unregister request from client %s", payload.Unregister.GetClientId())
-			s.unregisterClient(payload.Unregister.GetClientId())
-			return
 		case *pb.ClientMessage_ForceShutdown:
-			if payload.ForceShutdown == nil {
-				continue
+			if payload.ForceShutdown != nil {
+				s.handleForceShutdown(payload.ForceShutdown)
 			}
-			s.handleForceShutdown(payload.ForceShutdown)
 		default:
 			log.Printf("Unknown client message type: %T", payload)
 		}
+
+		s.putClientMessage(msg)
 	}
 }
 
@@ -247,60 +300,11 @@ func (s *Server) handleForwardResponse(resp *types.ForwardResponse) {
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	// Collect all unique models and add client count
-	modelMap := make(map[string]struct {
-		*types.ModelInfo
-		ClientCount int `json:"client_count"`
-	})
-
-	// First collect all model information
-	for _, client := range s.clients {
-		for _, model := range client.models {
-			if model == nil {
-				continue
-			}
-			modelID := model.GetId()
-			if existing, exists := modelMap[modelID]; exists {
-				// If the model already exists, only update the client count
-				existing.ClientCount = len(s.modelClients[modelID])
-				modelMap[modelID] = existing
-			} else {
-				modelMap[modelID] = struct {
-					*types.ModelInfo
-					ClientCount int `json:"client_count"`
-				}{
-					ModelInfo:   model,
-					ClientCount: len(s.modelClients[modelID]),
-				}
-			}
-		}
-	}
-
-	// Convert to slice
-	models := make([]struct {
-		*types.ModelInfo
-		ClientCount int `json:"client_count"`
-	}, 0, len(modelMap))
-	for _, model := range modelMap {
-		models = append(models, model)
-	}
-
-	response := struct {
-		Object string `json:"object"`
-		Data   []struct {
-			*types.ModelInfo
-			ClientCount int `json:"client_count"`
-		} `json:"data"`
-	}{
-		Object: "list",
-		Data:   models,
-	}
-
+	cache := s.getModelsCache()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(response)
+	if _, err := w.Write(cache); err != nil {
+		log.Printf("Failed to write models response: %v", err)
+	}
 }
 
 func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
@@ -344,7 +348,7 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 	requestID := generateRequestID()
 
 	// Create response channel
-	respChan := make(chan *types.ForwardResponse, 1)
+	respChan := make(chan *types.ForwardResponse, responseChannelBuffer)
 	s.reqMu.Lock()
 	s.pendingRequests[requestID] = respChan
 	s.reqMu.Unlock()
@@ -399,12 +403,7 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 
 	for i, currentClient := range candidateClients {
 		currentClientID := candidateClientIDs[i]
-		s.reqMu.RLock()
-		load := 0
-		if reqs, ok := s.clientRequests[currentClientID]; ok {
-			load = len(reqs)
-		}
-		s.reqMu.RUnlock()
+		load := int(currentClient.loadActive())
 
 		if bestClient == nil || load < minLoad {
 			minLoad = load
@@ -434,10 +433,12 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	s.clientRequests[clientID][requestID] = struct{}{}
 	s.reqMu.Unlock()
+	client.incrementActive()
 
 	// Wait for response
 	// The clientID variable from the outer scope (bestClientID) is captured by this defer.
 	defer func() {
+		client.decrementActive()
 		s.reqMu.Lock()
 		// Remove request from the client's active request set
 		if reqs, ok := s.clientRequests[clientID]; ok {
@@ -454,14 +455,14 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 		s.reqMu.Unlock()
 	}()
 
-	if err := client.writeProto(&types.ServerMessage{
-		Message: &pb.ServerMessage_ForwardRequest{
-			ForwardRequest: req,
-		},
-	}); err != nil {
+	forwardMsg := s.getServerMessage()
+	forwardMsg.Message = &pb.ServerMessage_ForwardRequest{ForwardRequest: req}
+	if err := client.writeProto(forwardMsg); err != nil {
+		s.putServerMessage(forwardMsg)
 		http.Error(w, "Failed to forward request", http.StatusInternalServerError)
 		return
 	}
+	s.putServerMessage(forwardMsg)
 
 	select {
 	case resp, ok := <-respChan:
@@ -488,7 +489,10 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 			flusher, _ := w.(http.Flusher)
 
 			// Write the first chunk
-			fmt.Fprintf(w, "data: %s\n\n", resp.GetBody())
+			if err := writeSSEChunk(w, resp.GetBody()); err != nil {
+				log.Printf("Failed to write SSE chunk: %v", err)
+				return
+			}
 			flusher.Flush()
 
 			// Continue processing subsequent chunks
@@ -499,41 +503,38 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 					if chunk.GetDone() {
-						fmt.Fprintf(w, "data: [DONE]\n\n")
+						if err := writeSSEChunk(w, []byte("[DONE]")); err != nil {
+							log.Printf("Failed to write SSE DONE chunk: %v", err)
+						}
 						flusher.Flush()
 						return
 					} else {
-						fmt.Fprintf(w, "data: %s\n\n", chunk.GetBody())
+						if err := writeSSEChunk(w, chunk.GetBody()); err != nil {
+							log.Printf("Failed to write SSE chunk: %v", err)
+							return
+						}
 						flusher.Flush()
 					}
 				case <-r.Context().Done():
 					// Send client close request
-					closeReq := &types.ServerMessage{
-						Message: &pb.ServerMessage_ClientClose{
-							ClientClose: &types.ClientClose{
-								RequestId: requestID,
-							},
-						},
-					}
+					closeReq := s.getServerMessage()
+					closeReq.Message = &pb.ServerMessage_ClientClose{ClientClose: &types.ClientClose{RequestId: requestID}}
 					if err := client.writeProto(closeReq); err != nil {
 						log.Printf("Failed to send close request: %v", err)
 					}
+					s.putServerMessage(closeReq)
 					return
 				}
 			}
 		}
 	case <-r.Context().Done():
 		// Send client close request
-		closeReq := &types.ServerMessage{
-			Message: &pb.ServerMessage_ClientClose{
-				ClientClose: &types.ClientClose{
-					RequestId: requestID,
-				},
-			},
-		}
+		closeReq := s.getServerMessage()
+		closeReq.Message = &pb.ServerMessage_ClientClose{ClientClose: &types.ClientClose{RequestId: requestID}}
 		if err := client.writeProto(closeReq); err != nil {
 			log.Printf("Failed to send close request: %v", err)
 		}
+		s.putServerMessage(closeReq)
 		return
 	}
 }
@@ -570,6 +571,7 @@ func (s *Server) unregisterClient(clientID string) {
 
 	delete(s.clients, clientID)
 	currentClientCount := len(s.clients)
+	s.modelsCacheDirty = true
 	s.mu.Unlock()
 
 	// Clean up clientRequests associated with this client
@@ -609,8 +611,8 @@ func (s *Server) handleModelUpdate(update *types.ModelUpdateRequest) {
 		}
 	}
 
-	client.models = append([]*types.ModelInfo(nil), update.GetModels()...)
-	for _, model := range update.GetModels() {
+	client.models = cloneModelInfos(update.GetModels())
+	for _, model := range client.models {
 		if model == nil {
 			continue
 		}
@@ -618,7 +620,8 @@ func (s *Server) handleModelUpdate(update *types.ModelUpdateRequest) {
 		s.modelClients[modelID] = append(s.modelClients[modelID], update.GetClientId())
 	}
 
-	log.Printf("Updated model list for client %s, current number of models: %d", update.GetClientId(), len(update.GetModels()))
+	log.Printf("Updated model list for client %s, current number of models: %d", update.GetClientId(), len(client.models))
+	s.modelsCacheDirty = true
 }
 
 func (s *Server) handleForceShutdown(req *types.ForceShutdownRequest) {
@@ -659,6 +662,189 @@ func (s *Server) handleForceShutdown(req *types.ForceShutdownRequest) {
 		}
 	}
 	log.Printf("Forcibly closed %d pending requests for client %s", len(requestsToCancel), req.GetClientId())
+}
+
+func (s *Server) getClientMessage() *types.ClientMessage {
+	if msg := s.clientMsgPool.Get(); msg != nil {
+		m := msg.(*types.ClientMessage)
+		proto.Reset(m)
+		return m
+	}
+	return &types.ClientMessage{}
+}
+
+func (s *Server) putClientMessage(msg *types.ClientMessage) {
+	if msg == nil {
+		return
+	}
+	proto.Reset(msg)
+	s.clientMsgPool.Put(msg)
+}
+
+func (s *Server) getServerMessage() *types.ServerMessage {
+	if msg := s.serverMsgPool.Get(); msg != nil {
+		m := msg.(*types.ServerMessage)
+		proto.Reset(m)
+		return m
+	}
+	return &types.ServerMessage{}
+}
+
+func (s *Server) putServerMessage(msg *types.ServerMessage) {
+	if msg == nil {
+		return
+	}
+	proto.Reset(msg)
+	s.serverMsgPool.Put(msg)
+}
+
+func (s *Server) getModelsCache() []byte {
+	s.mu.RLock()
+	if !s.modelsCacheDirty && s.modelsCache != nil {
+		cacheCopy := append([]byte(nil), s.modelsCache...)
+		s.mu.RUnlock()
+		return cacheCopy
+	}
+	s.mu.RUnlock()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.modelsCacheDirty && s.modelsCache != nil {
+		return append([]byte(nil), s.modelsCache...)
+	}
+	cache := s.buildModelsCacheLocked()
+	s.modelsCache = cache
+	s.modelsCacheDirty = false
+	return append([]byte(nil), cache...)
+}
+
+func (s *Server) buildModelsCacheLocked() []byte {
+	type modelEntry struct {
+		*types.ModelInfo
+		ClientCount int `json:"client_count"`
+	}
+
+	modelMap := make(map[string]*modelEntry)
+	for _, client := range s.clients {
+		for _, model := range client.models {
+			if model == nil {
+				continue
+			}
+			modelID := model.GetId()
+			entry, exists := modelMap[modelID]
+			if !exists {
+				entry = &modelEntry{
+					ModelInfo:   cloneModelInfo(model),
+					ClientCount: len(s.modelClients[modelID]),
+				}
+				modelMap[modelID] = entry
+			} else {
+				entry.ClientCount = len(s.modelClients[modelID])
+			}
+		}
+	}
+
+	entries := make([]modelEntry, 0, len(modelMap))
+	for _, entry := range modelMap {
+		entries = append(entries, *entry)
+	}
+
+	sort.Slice(entries, func(i, j int) bool {
+		left := ""
+		right := ""
+		if entries[i].ModelInfo != nil {
+			left = entries[i].ModelInfo.GetId()
+		}
+		if entries[j].ModelInfo != nil {
+			right = entries[j].ModelInfo.GetId()
+		}
+		return left < right
+	})
+
+	response := struct {
+		Object string       `json:"object"`
+		Data   []modelEntry `json:"data"`
+	}{
+		Object: "list",
+		Data:   entries,
+	}
+
+	data, err := json.Marshal(response)
+	if err != nil {
+		log.Printf("Failed to marshal models cache: %v", err)
+		return []byte(`{"object":"list","data":[]}`)
+	}
+	return data
+}
+
+func writeSSEChunk(w http.ResponseWriter, payload []byte) error {
+	if _, err := w.Write([]byte("data: ")); err != nil {
+		return err
+	}
+	if len(payload) > 0 {
+		if _, err := w.Write(payload); err != nil {
+			return err
+		}
+	}
+	_, err := w.Write([]byte("\n\n"))
+	return err
+}
+
+func cloneModelInfos(src []*types.ModelInfo) []*types.ModelInfo {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]*types.ModelInfo, 0, len(src))
+	for _, model := range src {
+		if model == nil {
+			out = append(out, nil)
+			continue
+		}
+		copy := cloneModelInfo(model)
+		out = append(out, copy)
+	}
+	return out
+}
+
+func cloneModelInfo(src *types.ModelInfo) *types.ModelInfo {
+	if src == nil {
+		return nil
+	}
+	copy := *src
+	return &copy
+}
+
+func cloneForwardResponse(src *types.ForwardResponse) *types.ForwardResponse {
+	if src == nil {
+		return nil
+	}
+	clone := &types.ForwardResponse{
+		RequestId:  src.GetRequestId(),
+		StatusCode: src.GetStatusCode(),
+		Body:       append([]byte(nil), src.GetBody()...),
+		Kind:       src.GetKind(),
+		Done:       src.GetDone(),
+		Timestamp:  src.GetTimestamp(),
+	}
+	clone.Header = cloneHeaderEntries(src.GetHeader())
+	return clone
+}
+
+func cloneHeaderEntries(entries []*types.HeaderEntry) []*types.HeaderEntry {
+	if len(entries) == 0 {
+		return nil
+	}
+	out := make([]*types.HeaderEntry, len(entries))
+	for i, entry := range entries {
+		if entry == nil {
+			continue
+		}
+		out[i] = &types.HeaderEntry{
+			Key:    entry.GetKey(),
+			Values: append([]string(nil), entry.GetValues()...),
+		}
+	}
+	return out
 }
 
 func (s *Server) handleGetClient(w http.ResponseWriter, r *http.Request) {

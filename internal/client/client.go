@@ -47,6 +47,7 @@ type Client struct {
 	activeRequests  int64 // Atomic counter
 	Version         string
 	connClosed      chan struct{} // Channel to signal connection closed
+	msgPool         sync.Pool
 }
 
 func NewClient(baseUrl, serverURL string, version string) *Client {
@@ -60,6 +61,11 @@ func NewClient(baseUrl, serverURL string, version string) *Client {
 		syncTicker:      time.NewTicker(30 * time.Second),
 		shutdownSignal:  make(chan struct{}),
 		connClosed:      make(chan struct{}),
+	}
+	client.msgPool = sync.Pool{
+		New: func() any {
+			return &types.ClientMessage{}
+		},
 	}
 
 	// Start the background goroutines only once
@@ -76,7 +82,7 @@ func (c *Client) fetchModels(silent bool) ([]*types.ModelInfo, error) {
 		if !silent {
 			log.Printf("Failed to create model request: %v", err)
 		}
-		return nil, err
+		return cloneModelInfos(c.models), err
 	}
 
 	if c.ApiKey != "" {
@@ -88,7 +94,7 @@ func (c *Client) fetchModels(silent bool) ([]*types.ModelInfo, error) {
 		if !silent {
 			log.Printf("Failed to get model list: %v", err)
 		}
-		return nil, err
+		return cloneModelInfos(c.models), err
 	}
 	defer resp.Body.Close()
 
@@ -97,12 +103,14 @@ func (c *Client) fetchModels(silent bool) ([]*types.ModelInfo, error) {
 		if !silent {
 			log.Printf("Failed to parse model response: %v", err)
 		}
-		return nil, err
+		return cloneModelInfos(c.models), err
 	}
 
+	cloned := cloneModelInfos(modelsResp.GetData())
+
 	if !silent {
-		log.Printf("Got %d models", len(modelsResp.GetData()))
-		for _, model := range modelsResp.GetData() {
+		log.Printf("Got %d models", len(cloned))
+		for _, model := range cloned {
 			if model == nil {
 				continue
 			}
@@ -110,13 +118,15 @@ func (c *Client) fetchModels(silent bool) ([]*types.ModelInfo, error) {
 		}
 	}
 
-	return modelsResp.GetData(), nil
+	return cloned, nil
 }
 
 func (c *Client) Connect() error {
 	models, err := c.fetchModels(false)
 	if err != nil {
-		log.Printf("Failed to fetch models during initial connection, using empty model list: %v", err)
+		log.Printf("Failed to fetch models during initial connection, using cached model list: %v", err)
+	}
+	if models == nil {
 		models = []*types.ModelInfo{}
 	}
 	c.models = models
@@ -147,20 +157,21 @@ func (c *Client) Connect() error {
 	}
 	log.Printf("Successfully connected to server %s", serverToPrint)
 
-	registration := &types.ClientMessage{
-		Message: &pb.ClientMessage_Registration{
-			Registration: &types.ClientRegistration{
-				ClientId: c.ClientID,
-				Models:   c.models,
-				Version:  c.Version,
-			},
+	registration := c.getClientMessage()
+	registration.Message = &pb.ClientMessage_Registration{
+		Registration: &types.ClientRegistration{
+			ClientId: c.ClientID,
+			Models:   cloneModelInfos(c.models),
+			Version:  c.Version,
 		},
 	}
 	if err := c.writeProto(registration); err != nil {
 		log.Printf("Failed to send registration information: %v", err)
 		conn.Close()
+		c.putClientMessage(registration)
 		return err
 	}
+	c.putClientMessage(registration)
 	log.Printf("Sent client registration information, ID: %s", c.ClientID)
 
 	// Start the connection handler in a separate goroutine
@@ -181,18 +192,19 @@ func (c *Client) heartbeatLoop() {
 			continue
 		}
 
-		heartbeat := &types.ClientMessage{
-			Message: &pb.ClientMessage_Heartbeat{
-				Heartbeat: &types.Heartbeat{
-					Timestamp: time.Now().Unix(),
-				},
+		heartbeat := c.getClientMessage()
+		heartbeat.Message = &pb.ClientMessage_Heartbeat{
+			Heartbeat: &types.Heartbeat{
+				Timestamp: time.Now().Unix(),
 			},
 		}
 		if err := c.writeProto(heartbeat); err != nil {
 			log.Printf("Failed to send heartbeat: %v", err)
 			c.signalConnectionClosed()
+			c.putClientMessage(heartbeat)
 			continue
 		}
+		c.putClientMessage(heartbeat)
 	}
 }
 
@@ -208,7 +220,10 @@ func (c *Client) modelSyncLoop() {
 			continue
 		}
 
-		newModels, _ := c.fetchModels(true)
+		newModels, err := c.fetchModels(true)
+		if err != nil && len(newModels) == 0 {
+			continue
+		}
 		if !c.modelsEqual(newModels) {
 			log.Printf("Detected model changes, triggering update")
 			log.Printf("Updated model list (%d models):", len(newModels))
@@ -339,17 +354,13 @@ func (c *Client) forwardRequest(req *types.ForwardRequest) {
 	httpReq, err := http.NewRequestWithContext(ctx, req.GetMethod(), upstreamURL, bytes.NewReader(req.GetBody()))
 	if err != nil {
 		log.Printf("Failed to create upstream request: %v", err)
-		errResp := &types.ClientMessage{
-			Message: &pb.ClientMessage_ForwardResponse{
-				ForwardResponse: &types.ForwardResponse{
-					RequestId:  req.GetRequestId(),
-					StatusCode: int32(http.StatusInternalServerError),
-					Body:       []byte(fmt.Sprintf("Error: %v", err)),
-					Kind:       types.ResponseKindNormal,
-				},
-			},
+		errResp := &types.ForwardResponse{
+			RequestId:  req.GetRequestId(),
+			StatusCode: int32(http.StatusInternalServerError),
+			Body:       []byte(fmt.Sprintf("Error: %v", err)),
+			Kind:       types.ResponseKindNormal,
 		}
-		if err := c.writeProto(errResp); err != nil {
+		if err := c.sendForwardResponse(errResp); err != nil {
 			log.Printf("Failed to send error response: %v", err)
 		}
 		return
@@ -374,17 +385,13 @@ func (c *Client) forwardRequest(req *types.ForwardRequest) {
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
 		log.Printf("Upstream request execution failed: %v", err)
-		errResp := &types.ClientMessage{
-			Message: &pb.ClientMessage_ForwardResponse{
-				ForwardResponse: &types.ForwardResponse{
-					RequestId:  req.GetRequestId(),
-					StatusCode: int32(http.StatusInternalServerError),
-					Body:       []byte(fmt.Sprintf("Error: %v", err)),
-					Kind:       types.ResponseKindNormal,
-				},
-			},
+		errResp := &types.ForwardResponse{
+			RequestId:  req.GetRequestId(),
+			StatusCode: int32(http.StatusInternalServerError),
+			Body:       []byte(fmt.Sprintf("Error: %v", err)),
+			Kind:       types.ResponseKindNormal,
 		}
-		if err := c.writeProto(errResp); err != nil {
+		if err := c.sendForwardResponse(errResp); err != nil {
 			log.Printf("Failed to send error response: %v", err)
 		}
 		return
@@ -397,36 +404,28 @@ func (c *Client) forwardRequest(req *types.ForwardRequest) {
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("Failed to read response body: %v", err)
-			errResp := &types.ClientMessage{
-				Message: &pb.ClientMessage_ForwardResponse{
-					ForwardResponse: &types.ForwardResponse{
-						RequestId:  req.GetRequestId(),
-						StatusCode: int32(http.StatusInternalServerError),
-						Body:       []byte(fmt.Sprintf("Error: %v", err)),
-						Kind:       types.ResponseKindNormal,
-					},
-				},
+			errResp := &types.ForwardResponse{
+				RequestId:  req.GetRequestId(),
+				StatusCode: int32(http.StatusInternalServerError),
+				Body:       []byte(fmt.Sprintf("Error: %v", err)),
+				Kind:       types.ResponseKindNormal,
 			}
-			if err := c.writeProto(errResp); err != nil {
+			if err := c.sendForwardResponse(errResp); err != nil {
 				log.Printf("Failed to send error response: %v", err)
 			}
 			return
 		}
 
 		// Create forward response structure
-		forwardResp := &types.ClientMessage{
-			Message: &pb.ClientMessage_ForwardResponse{
-				ForwardResponse: &types.ForwardResponse{
-					RequestId:  req.GetRequestId(),
-					StatusCode: int32(resp.StatusCode),
-					Header:     types.HTTPHeaderToProto(resp.Header.Clone()),
-					Body:       body,
-					Kind:       types.ResponseKindNormal,
-				},
-			},
+		forwardResp := &types.ForwardResponse{
+			RequestId:  req.GetRequestId(),
+			StatusCode: int32(resp.StatusCode),
+			Header:     types.HTTPHeaderToProto(resp.Header.Clone()),
+			Body:       body,
+			Kind:       types.ResponseKindNormal,
 		}
 
-		if err := c.writeProto(forwardResp); err != nil {
+		if err := c.sendForwardResponse(forwardResp); err != nil {
 			log.Printf("Failed to send response: %v", err)
 			return
 		}
@@ -447,18 +446,12 @@ func (c *Client) handleStreamResponse(reader io.Reader, requestID string, ctx co
 			if bytes.HasPrefix(line, []byte("data: ")) {
 				content := bytes.TrimSpace(line[6:])
 				if bytes.Equal(content, []byte("[DONE]")) {
-					// Send stream end marker
-					doneResp := &types.ClientMessage{
-						Message: &pb.ClientMessage_ForwardResponse{
-							ForwardResponse: &types.ForwardResponse{
-								RequestId:  requestID,
-								Kind:       types.ResponseKindStream,
-								Done:       true,
-								StatusCode: int32(http.StatusOK),
-							},
-						},
-					}
-					if err := c.writeProto(doneResp); err != nil {
+					if err := c.sendForwardResponse(&types.ForwardResponse{
+						RequestId:  requestID,
+						Kind:       types.ResponseKindStream,
+						Done:       true,
+						StatusCode: int32(http.StatusOK),
+					}); err != nil {
 						log.Printf("Failed to send stream end marker: %v", err)
 					}
 					return
@@ -470,17 +463,12 @@ func (c *Client) handleStreamResponse(reader io.Reader, requestID string, ctx co
 			if len(line) == 0 {
 				if buffer.Len() > 0 {
 					chunkData := append([]byte(nil), buffer.Bytes()...)
-					chunk := &types.ClientMessage{
-						Message: &pb.ClientMessage_ForwardResponse{
-							ForwardResponse: &types.ForwardResponse{
-								RequestId:  requestID,
-								Kind:       types.ResponseKindStream,
-								StatusCode: int32(http.StatusOK),
-								Body:       chunkData,
-							},
-						},
-					}
-					if err := c.writeProto(chunk); err != nil {
+					if err := c.sendForwardResponse(&types.ForwardResponse{
+						RequestId:  requestID,
+						Kind:       types.ResponseKindStream,
+						StatusCode: int32(http.StatusOK),
+						Body:       chunkData,
+					}); err != nil {
 						log.Printf("Failed to send stream data chunk: %v", err)
 						return
 					}
@@ -574,18 +562,18 @@ func (c *Client) modelsEqual(newModels []*types.ModelInfo) bool {
 }
 
 func (c *Client) notifyModelUpdate(models []*types.ModelInfo) {
-	updateReq := &types.ClientMessage{
-		Message: &pb.ClientMessage_ModelUpdate{
-			ModelUpdate: &types.ModelUpdateRequest{
-				ClientId: c.ClientID,
-				Models:   models,
-			},
+	msg := c.getClientMessage()
+	msg.Message = &pb.ClientMessage_ModelUpdate{
+		ModelUpdate: &types.ModelUpdateRequest{
+			ClientId: c.ClientID,
+			Models:   cloneModelInfos(models),
 		},
 	}
 
-	if err := c.writeProto(updateReq); err != nil {
+	if err := c.writeProto(msg); err != nil {
 		log.Printf("Failed to send model update notification: %v", err)
 	}
+	c.putClientMessage(msg)
 }
 
 func (c *Client) Shutdown() {
@@ -629,16 +617,16 @@ func (c *Client) WaitForShutdown() {
 		}
 		log.Println("Force shutdown, notifying server to interrupt requests")
 		// Send force shutdown notification
-		forceReq := &types.ClientMessage{
-			Message: &pb.ClientMessage_ForceShutdown{
-				ForceShutdown: &types.ForceShutdownRequest{
-					ClientId: c.ClientID,
-				},
+		forceReq := c.getClientMessage()
+		forceReq.Message = &pb.ClientMessage_ForceShutdown{
+			ForceShutdown: &types.ForceShutdownRequest{
+				ClientId: c.ClientID,
 			},
 		}
 		if err := c.writeProto(forceReq); err != nil {
 			log.Printf("Failed to send force shutdown notification: %v", err)
 		}
+		c.putClientMessage(forceReq)
 
 		log.Println("Forcing shutdown...")
 		os.Exit(1)
@@ -665,4 +653,45 @@ func (c *Client) waitForRequests() <-chan struct{} {
 		close(ch)
 	}()
 	return ch
+}
+
+func (c *Client) getClientMessage() *types.ClientMessage {
+	if msg := c.msgPool.Get(); msg != nil {
+		m := msg.(*types.ClientMessage)
+		proto.Reset(m)
+		return m
+	}
+	return &types.ClientMessage{}
+}
+
+func (c *Client) putClientMessage(msg *types.ClientMessage) {
+	if msg == nil {
+		return
+	}
+	proto.Reset(msg)
+	c.msgPool.Put(msg)
+}
+
+func (c *Client) sendForwardResponse(resp *types.ForwardResponse) error {
+	msg := c.getClientMessage()
+	msg.Message = &pb.ClientMessage_ForwardResponse{ForwardResponse: resp}
+	err := c.writeProto(msg)
+	c.putClientMessage(msg)
+	return err
+}
+
+func cloneModelInfos(src []*types.ModelInfo) []*types.ModelInfo {
+	if len(src) == 0 {
+		return nil
+	}
+	out := make([]*types.ModelInfo, 0, len(src))
+	for _, model := range src {
+		if model == nil {
+			out = append(out, nil)
+			continue
+		}
+		copy := *model
+		out = append(out, &copy)
+	}
+	return out
 }
