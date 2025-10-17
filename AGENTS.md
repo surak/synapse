@@ -71,5 +71,5 @@ Synapse is a reverse proxy system for LLM APIs with two main components:
 
 ## Dependencies
 - `github.com/gorilla/websocket` - WebSocket implementation
-- Go 1.21+ required
+- Go 1.23+ required
 - No other external dependencies
