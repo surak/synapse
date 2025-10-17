@@ -23,6 +23,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/zeyugao/synapse/internal/types"
+	pb "github.com/zeyugao/synapse/internal/types/proto"
+	"google.golang.org/protobuf/proto"
 )
 
 type Client struct {
@@ -31,7 +33,7 @@ type Client struct {
 	ClientID        string
 	WSAuthKey       string
 	ApiKey          string
-	models          []types.ModelInfo
+	models          []*types.ModelInfo
 	conn            *websocket.Conn
 	mu              sync.Mutex
 	reconnMu        sync.Mutex
@@ -68,7 +70,7 @@ func NewClient(baseUrl, serverURL string, version string) *Client {
 	return client
 }
 
-func (c *Client) fetchModels(silent bool) ([]types.ModelInfo, error) {
+func (c *Client) fetchModels(silent bool) ([]*types.ModelInfo, error) {
 	req, err := http.NewRequest("GET", fmt.Sprintf("%s/models", c.BaseUrl), nil)
 	if err != nil {
 		if !silent {
@@ -99,20 +101,23 @@ func (c *Client) fetchModels(silent bool) ([]types.ModelInfo, error) {
 	}
 
 	if !silent {
-		log.Printf("Got %d models", len(modelsResp.Data))
-		for _, model := range modelsResp.Data {
-			log.Printf("- %s", model.ID)
+		log.Printf("Got %d models", len(modelsResp.GetData()))
+		for _, model := range modelsResp.GetData() {
+			if model == nil {
+				continue
+			}
+			log.Printf("- %s", model.GetId())
 		}
 	}
 
-	return modelsResp.Data, nil
+	return modelsResp.GetData(), nil
 }
 
 func (c *Client) Connect() error {
 	models, err := c.fetchModels(false)
 	if err != nil {
 		log.Printf("Failed to fetch models during initial connection, using empty model list: %v", err)
-		models = []types.ModelInfo{}
+		models = []*types.ModelInfo{}
 	}
 	c.models = models
 
@@ -142,12 +147,16 @@ func (c *Client) Connect() error {
 	}
 	log.Printf("Successfully connected to server %s", serverToPrint)
 
-	registration := types.ClientRegistration{
-		ClientID: c.ClientID,
-		Models:   c.models,
-		Version:  c.Version,
+	registration := &types.ClientMessage{
+		Message: &pb.ClientMessage_Registration{
+			Registration: &types.ClientRegistration{
+				ClientId: c.ClientID,
+				Models:   c.models,
+				Version:  c.Version,
+			},
+		},
 	}
-	if err := conn.WriteJSON(registration); err != nil {
+	if err := c.writeProto(registration); err != nil {
 		log.Printf("Failed to send registration information: %v", err)
 		conn.Close()
 		return err
@@ -172,11 +181,14 @@ func (c *Client) heartbeatLoop() {
 			continue
 		}
 
-		heartbeat := types.ForwardResponse{
-			Timestamp: time.Now().Unix(),
-			Type:      types.TypeHeartbeat,
+		heartbeat := &types.ClientMessage{
+			Message: &pb.ClientMessage_Heartbeat{
+				Heartbeat: &types.Heartbeat{
+					Timestamp: time.Now().Unix(),
+				},
+			},
 		}
-		if err := c.writeJSON(heartbeat); err != nil {
+		if err := c.writeProto(heartbeat); err != nil {
 			log.Printf("Failed to send heartbeat: %v", err)
 			c.signalConnectionClosed()
 			continue
@@ -201,7 +213,10 @@ func (c *Client) modelSyncLoop() {
 			log.Printf("Detected model changes, triggering update")
 			log.Printf("Updated model list (%d models):", len(newModels))
 			for _, model := range newModels {
-				log.Printf("- %s", model.ID)
+				if model == nil {
+					continue
+				}
+				log.Printf("- %s", model.GetId())
 			}
 			c.models = newModels
 			c.notifyModelUpdate(newModels)
@@ -213,8 +228,8 @@ func (c *Client) handleRequests() {
 	defer c.signalConnectionClosed()
 
 	for {
-		var req types.ForwardRequest
-		if err := c.conn.ReadJSON(&req); err != nil {
+		msg, err := readServerMessage(c.conn)
+		if err != nil {
 			if c.closing {
 				return
 			}
@@ -233,20 +248,27 @@ func (c *Client) handleRequests() {
 			return
 		}
 
-		// Handle different types of requests
-		switch req.Type {
-		case types.TypePong:
-		case types.TypeNormal:
-			go c.forwardRequest(req)
-		case types.TypeClientClose: // Add handling of close requests
+		switch payload := msg.Message.(type) {
+		case *pb.ServerMessage_ForwardRequest:
+			if payload.ForwardRequest == nil {
+				continue
+			}
+			go c.forwardRequest(payload.ForwardRequest)
+		case *pb.ServerMessage_ClientClose:
+			if payload.ClientClose == nil {
+				continue
+			}
+			requestID := payload.ClientClose.GetRequestId()
 			c.mu.Lock()
-			cancel, exists := c.cancelMap[req.RequestID]
+			cancel, exists := c.cancelMap[requestID]
 			c.mu.Unlock()
 			if exists {
-				cancel() // Cancel the corresponding request
+				cancel()
 			}
+		case *pb.ServerMessage_Pong:
+			// Ignore pong
 		default:
-			log.Printf("Unknown request type: %d", req.Type)
+			log.Printf("Unknown server message type: %T", payload)
 		}
 	}
 }
@@ -262,7 +284,7 @@ func (c *Client) signalConnectionClosed() {
 	}
 }
 
-func (c *Client) writeJSON(v any) error {
+func (c *Client) writeProto(msg proto.Message) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -270,51 +292,74 @@ func (c *Client) writeJSON(v any) error {
 		return fmt.Errorf("connection is nil")
 	}
 
-	return c.conn.WriteJSON(v)
+	data, err := proto.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	return c.conn.WriteMessage(websocket.BinaryMessage, data)
 }
 
-func (c *Client) forwardRequest(req types.ForwardRequest) {
+func readServerMessage(conn *websocket.Conn) (*types.ServerMessage, error) {
+	_, data, err := conn.ReadMessage()
+	if err != nil {
+		return nil, err
+	}
+
+	msg := &types.ServerMessage{}
+	if err := proto.Unmarshal(data, msg); err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
+
+func (c *Client) forwardRequest(req *types.ForwardRequest) {
 	c.trackRequest(true)
 	defer c.trackRequest(false)
 
 	// Create a cancellable context
 	ctx, cancel := context.WithCancel(context.Background())
 	c.mu.Lock()
-	c.cancelMap[req.RequestID] = cancel
+	c.cancelMap[req.GetRequestId()] = cancel
 	c.mu.Unlock()
 
 	// Clean up on function return
 	defer func() {
 		c.mu.Lock()
-		delete(c.cancelMap, req.RequestID)
+		delete(c.cancelMap, req.GetRequestId())
 		c.mu.Unlock()
 	}()
 
 	var upstreamURL string
-	if req.Query == "" {
-		upstreamURL = fmt.Sprintf("%s%s", c.BaseUrl, req.Path)
+	if req.GetQuery() == "" {
+		upstreamURL = fmt.Sprintf("%s%s", c.BaseUrl, req.GetPath())
 	} else {
-		upstreamURL = fmt.Sprintf("%s%s?%s", c.BaseUrl, req.Path, req.Query)
+		upstreamURL = fmt.Sprintf("%s%s?%s", c.BaseUrl, req.GetPath(), req.GetQuery())
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, req.Method, upstreamURL, bytes.NewReader(req.Body))
+	httpReq, err := http.NewRequestWithContext(ctx, req.GetMethod(), upstreamURL, bytes.NewReader(req.GetBody()))
 	if err != nil {
 		log.Printf("Failed to create upstream request: %v", err)
-		errResp := types.ForwardResponse{
-			RequestID:  req.RequestID,
-			StatusCode: http.StatusInternalServerError,
-			Body:       []byte(fmt.Sprintf("Error: %v", err)),
-			Type:       types.TypeNormal,
+		errResp := &types.ClientMessage{
+			Message: &pb.ClientMessage_ForwardResponse{
+				ForwardResponse: &types.ForwardResponse{
+					RequestId:  req.GetRequestId(),
+					StatusCode: int32(http.StatusInternalServerError),
+					Body:       []byte(fmt.Sprintf("Error: %v", err)),
+					Kind:       types.ResponseKindNormal,
+				},
+			},
 		}
-		if err := c.writeJSON(errResp); err != nil {
+		if err := c.writeProto(errResp); err != nil {
 			log.Printf("Failed to send error response: %v", err)
 		}
 		return
 	}
 
 	// Set request headers
-	for k, v := range req.Header {
-		httpReq.Header[k] = v
+	for k, values := range types.ProtoToHTTPHeader(req.GetHeader()) {
+		for _, v := range values {
+			httpReq.Header.Add(k, v)
+		}
 	}
 
 	if c.ApiKey != "" {
@@ -329,13 +374,17 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 	resp, err := http.DefaultClient.Do(httpReq)
 	if err != nil {
 		log.Printf("Upstream request execution failed: %v", err)
-		errResp := types.ForwardResponse{
-			RequestID:  req.RequestID,
-			StatusCode: http.StatusInternalServerError,
-			Body:       []byte(fmt.Sprintf("Error: %v", err)),
-			Type:       types.TypeNormal,
+		errResp := &types.ClientMessage{
+			Message: &pb.ClientMessage_ForwardResponse{
+				ForwardResponse: &types.ForwardResponse{
+					RequestId:  req.GetRequestId(),
+					StatusCode: int32(http.StatusInternalServerError),
+					Body:       []byte(fmt.Sprintf("Error: %v", err)),
+					Kind:       types.ResponseKindNormal,
+				},
+			},
 		}
-		if err := c.writeJSON(errResp); err != nil {
+		if err := c.writeProto(errResp); err != nil {
 			log.Printf("Failed to send error response: %v", err)
 		}
 		return
@@ -343,33 +392,41 @@ func (c *Client) forwardRequest(req types.ForwardRequest) {
 	defer resp.Body.Close()
 
 	if mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type")); err == nil && mediaType == "text/event-stream" {
-		c.handleStreamResponse(resp.Body, req.RequestID, ctx)
+		c.handleStreamResponse(resp.Body, req.GetRequestId(), ctx)
 	} else {
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			log.Printf("Failed to read response body: %v", err)
-			errResp := types.ForwardResponse{
-				RequestID:  req.RequestID,
-				StatusCode: http.StatusInternalServerError,
-				Body:       []byte(fmt.Sprintf("Error: %v", err)),
-				Type:       types.TypeNormal,
+			errResp := &types.ClientMessage{
+				Message: &pb.ClientMessage_ForwardResponse{
+					ForwardResponse: &types.ForwardResponse{
+						RequestId:  req.GetRequestId(),
+						StatusCode: int32(http.StatusInternalServerError),
+						Body:       []byte(fmt.Sprintf("Error: %v", err)),
+						Kind:       types.ResponseKindNormal,
+					},
+				},
 			}
-			if err := c.writeJSON(errResp); err != nil {
+			if err := c.writeProto(errResp); err != nil {
 				log.Printf("Failed to send error response: %v", err)
 			}
 			return
 		}
 
 		// Create forward response structure
-		forwardResp := types.ForwardResponse{
-			RequestID:  req.RequestID,
-			StatusCode: resp.StatusCode,
-			Header:     resp.Header,
-			Body:       body,
-			Type:       types.TypeNormal,
+		forwardResp := &types.ClientMessage{
+			Message: &pb.ClientMessage_ForwardResponse{
+				ForwardResponse: &types.ForwardResponse{
+					RequestId:  req.GetRequestId(),
+					StatusCode: int32(resp.StatusCode),
+					Header:     types.HTTPHeaderToProto(resp.Header.Clone()),
+					Body:       body,
+					Kind:       types.ResponseKindNormal,
+				},
+			},
 		}
 
-		if err := c.writeJSON(forwardResp); err != nil {
+		if err := c.writeProto(forwardResp); err != nil {
 			log.Printf("Failed to send response: %v", err)
 			return
 		}
@@ -391,13 +448,17 @@ func (c *Client) handleStreamResponse(reader io.Reader, requestID string, ctx co
 				content := bytes.TrimSpace(line[6:])
 				if bytes.Equal(content, []byte("[DONE]")) {
 					// Send stream end marker
-					doneResp := types.ForwardResponse{
-						RequestID:  requestID,
-						Type:       types.TypeStream,
-						Done:       true,
-						StatusCode: http.StatusOK,
+					doneResp := &types.ClientMessage{
+						Message: &pb.ClientMessage_ForwardResponse{
+							ForwardResponse: &types.ForwardResponse{
+								RequestId:  requestID,
+								Kind:       types.ResponseKindStream,
+								Done:       true,
+								StatusCode: int32(http.StatusOK),
+							},
+						},
 					}
-					if err := c.writeJSON(doneResp); err != nil {
+					if err := c.writeProto(doneResp); err != nil {
 						log.Printf("Failed to send stream end marker: %v", err)
 					}
 					return
@@ -408,13 +469,18 @@ func (c *Client) handleStreamResponse(reader io.Reader, requestID string, ctx co
 			// Send a chunk of data when an empty line is encountered
 			if len(line) == 0 {
 				if buffer.Len() > 0 {
-					chunk := types.ForwardResponse{
-						RequestID:  requestID,
-						Type:       types.TypeStream,
-						StatusCode: http.StatusOK,
-						Body:       buffer.Bytes(),
+					chunkData := append([]byte(nil), buffer.Bytes()...)
+					chunk := &types.ClientMessage{
+						Message: &pb.ClientMessage_ForwardResponse{
+							ForwardResponse: &types.ForwardResponse{
+								RequestId:  requestID,
+								Kind:       types.ResponseKindStream,
+								StatusCode: int32(http.StatusOK),
+								Body:       chunkData,
+							},
+						},
 					}
-					if err := c.writeJSON(chunk); err != nil {
+					if err := c.writeProto(chunk); err != nil {
 						log.Printf("Failed to send stream data chunk: %v", err)
 						return
 					}
@@ -482,41 +548,42 @@ func (c *Client) Close() {
 	c.syncTicker.Stop()
 }
 
-func (c *Client) modelsEqual(newModels []types.ModelInfo) bool {
+func (c *Client) modelsEqual(newModels []*types.ModelInfo) bool {
 	if len(c.models) != len(newModels) {
 		return false
 	}
 
 	oldMap := make(map[string]struct{})
 	for _, m := range c.models {
-		oldMap[m.ID] = struct{}{}
+		if m == nil {
+			continue
+		}
+		oldMap[m.GetId()] = struct{}{}
 	}
 
 	for _, m := range newModels {
-		if _, ok := oldMap[m.ID]; !ok {
+		if m == nil {
+			continue
+		}
+		if _, ok := oldMap[m.GetId()]; !ok {
 			return false
 		}
-		delete(oldMap, m.ID)
+		delete(oldMap, m.GetId())
 	}
 	return len(oldMap) == 0
 }
 
-func (c *Client) notifyModelUpdate(models []types.ModelInfo) {
-	body, err := json.Marshal(types.ModelUpdateRequest{
-		ClientID: c.ClientID,
-		Models:   models,
-	})
-	if err != nil {
-		log.Printf("Failed to serialize model update request: %v", err)
-		return
+func (c *Client) notifyModelUpdate(models []*types.ModelInfo) {
+	updateReq := &types.ClientMessage{
+		Message: &pb.ClientMessage_ModelUpdate{
+			ModelUpdate: &types.ModelUpdateRequest{
+				ClientId: c.ClientID,
+				Models:   models,
+			},
+		},
 	}
 
-	updateReq := types.ForwardRequest{
-		Type: types.TypeModelUpdate,
-		Body: body,
-	}
-
-	if err := c.writeJSON(updateReq); err != nil {
+	if err := c.writeProto(updateReq); err != nil {
 		log.Printf("Failed to send model update notification: %v", err)
 	}
 }
@@ -549,7 +616,7 @@ func (c *Client) WaitForShutdown() {
 			break
 		}
 		log.Println("Notifying server to update model list")
-		c.notifyModelUpdate([]types.ModelInfo{})
+		c.notifyModelUpdate(nil)
 	case <-c.shutdownSignal:
 		return
 	}
@@ -562,12 +629,14 @@ func (c *Client) WaitForShutdown() {
 		}
 		log.Println("Force shutdown, notifying server to interrupt requests")
 		// Send force shutdown notification
-		body, _ := json.Marshal(types.ForceShutdownRequest{ClientID: c.ClientID})
-		forceReq := types.ForwardRequest{
-			Type: types.TypeForceShutdown,
-			Body: body,
+		forceReq := &types.ClientMessage{
+			Message: &pb.ClientMessage_ForceShutdown{
+				ForceShutdown: &types.ForceShutdownRequest{
+					ClientId: c.ClientID,
+				},
+			},
 		}
-		if err := c.writeJSON(forceReq); err != nil {
+		if err := c.writeProto(forceReq); err != nil {
 			log.Printf("Failed to send force shutdown notification: %v", err)
 		}
 

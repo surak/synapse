@@ -2,75 +2,64 @@ package types
 
 import (
 	"net/http"
+
+	pb "github.com/zeyugao/synapse/internal/types/proto"
 )
 
-// ModelInfo stores model information
-type ModelInfo struct {
-	ID      string `json:"id"`
-	Object  string `json:"object"`
-	Created int64  `json:"created"`
-	Owned   string `json:"owned_by"`
-}
+type (
+	ModelInfo            = pb.ModelInfo
+	ModelsResponse       = pb.ModelsResponse
+	ClientRegistration   = pb.ClientRegistration
+	ForwardRequest       = pb.ForwardRequest
+	ForwardResponse      = pb.ForwardResponse
+	ModelUpdateRequest   = pb.ModelUpdateRequest
+	UnregisterRequest    = pb.UnregisterRequest
+	ForceShutdownRequest = pb.ForceShutdownRequest
+	ServerMessage        = pb.ServerMessage
+	ClientMessage        = pb.ClientMessage
+	HeaderEntry          = pb.HeaderEntry
+	ResponseKind         = pb.ResponseKind
+	Heartbeat            = pb.Heartbeat
+	ClientClose          = pb.ClientClose
+	Pong                 = pb.Pong
+)
 
-// ModelsResponse Model list returned by upstream API
-type ModelsResponse struct {
-	Object string      `json:"object"`
-	Data   []ModelInfo `json:"data"`
-}
-
-// ClientRegistration Client registration information
-type ClientRegistration struct {
-	ClientID string      `json:"client_id"`
-	Models   []ModelInfo `json:"models"`
-	Version  string      `json:"version"`
-}
-
-// ForwardRequest Structure of the forwarded request
-type ForwardRequest struct {
-	Type      int         `json:"type"`
-	RequestID string      `json:"request_id"`
-	Model     string      `json:"model"`
-	Method    string      `json:"method"`
-	Path      string      `json:"path"`
-	Query     string      `json:"query"`
-	Header    http.Header `json:"header"`
-	Body      []byte      `json:"body"`
-}
-
-// ResponseType represents the response type
 const (
-	TypeNormal        = 0 // Normal response
-	TypeStream        = 1 // Streaming response
-	TypeHeartbeat     = 2 // Heartbeat type
-	TypePong          = 3 // Pong response
-	TypeClientClose   = 4 // Client close request
-	TypeModelUpdate   = 5 // Model update type
-	TypeUnregister    = 6 // Add: Unregister type
-	TypeForceShutdown = 7 // Add: Force shutdown type
+	ResponseKindUnspecified = pb.ResponseKind_RESPONSE_KIND_UNSPECIFIED
+	ResponseKindNormal      = pb.ResponseKind_RESPONSE_KIND_NORMAL
+	ResponseKindStream      = pb.ResponseKind_RESPONSE_KIND_STREAM
 )
 
-type ForwardResponse struct {
-	RequestID  string      `json:"request_id"`
-	StatusCode int         `json:"status_code"`
-	Header     http.Header `json:"header"`
-	Body       []byte      `json:"body"`
-	Type       int         `json:"type"` // TypeNormal or TypeStream
-	Done       bool        `json:"done"` // Used for stream end marker
-	Timestamp  int64       `json:"timestamp"`
+// HTTPHeaderToProto converts an http.Header to protobuf header entries.
+func HTTPHeaderToProto(header http.Header) []*pb.HeaderEntry {
+	if header == nil {
+		return nil
+	}
+
+	entries := make([]*pb.HeaderEntry, 0, len(header))
+	for key, values := range header {
+		entry := &pb.HeaderEntry{
+			Key:    key,
+			Values: append([]string(nil), values...),
+		}
+		entries = append(entries, entry)
+	}
+	return entries
 }
 
-// Add model update request structure
-type ModelUpdateRequest struct {
-	ClientID string      `json:"client_id"`
-	Models   []ModelInfo `json:"models"`
-}
+// ProtoToHTTPHeader converts protobuf header entries back to http.Header.
+func ProtoToHTTPHeader(entries []*pb.HeaderEntry) http.Header {
+	if len(entries) == 0 {
+		return http.Header{}
+	}
 
-// Add unregister request structure
-type UnregisterRequest struct {
-	ClientID string `json:"client_id"`
-}
-
-// Add force shutdown request structure
-type ForceShutdownRequest struct {
-	ClientID string `json:"client_id"`
+	header := make(http.Header, len(entries))
+	for _, entry := range entries {
+		if entry == nil {
+			continue
+		}
+		values := append([]string(nil), entry.Values...)
+		header[entry.Key] = values
+	}
+	return header
 }

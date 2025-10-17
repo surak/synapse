@@ -1,0 +1,96 @@
+syntax = "proto3";
+
+package synapse.types;
+
+option go_package = "github.com/zeyugao/synapse/internal/types/pb";
+
+message ModelInfo {
+  string id = 1;
+  string object = 2;
+  int64 created = 3;
+  string owned_by = 4;
+}
+
+message ModelsResponse {
+  string object = 1;
+  repeated ModelInfo data = 2;
+}
+
+message ClientRegistration {
+  string client_id = 1;
+  repeated ModelInfo models = 2;
+  string version = 3;
+}
+
+message HeaderEntry {
+  string key = 1;
+  repeated string values = 2;
+}
+
+message ForwardRequest {
+  string request_id = 1;
+  string model = 2;
+  string method = 3;
+  string path = 4;
+  string query = 5;
+  repeated HeaderEntry header = 6;
+  bytes body = 7;
+}
+
+enum ResponseKind {
+  RESPONSE_KIND_UNSPECIFIED = 0;
+  RESPONSE_KIND_NORMAL = 1;
+  RESPONSE_KIND_STREAM = 2;
+}
+
+message ForwardResponse {
+  string request_id = 1;
+  int32 status_code = 2;
+  repeated HeaderEntry header = 3;
+  bytes body = 4;
+  ResponseKind kind = 5;
+  bool done = 6;
+  int64 timestamp = 7;
+}
+
+message Heartbeat {
+  int64 timestamp = 1;
+}
+
+message ModelUpdateRequest {
+  string client_id = 1;
+  repeated ModelInfo models = 2;
+}
+
+message UnregisterRequest {
+  string client_id = 1;
+}
+
+message ForceShutdownRequest {
+  string client_id = 1;
+}
+
+message Pong {}
+
+message ClientClose {
+  string request_id = 1;
+}
+
+message ServerMessage {
+  oneof message {
+    ForwardRequest forward_request = 1;
+    ClientClose client_close = 2;
+    Pong pong = 3;
+  }
+}
+
+message ClientMessage {
+  oneof message {
+    ClientRegistration registration = 1;
+    ForwardResponse forward_response = 2;
+    Heartbeat heartbeat = 3;
+    ModelUpdateRequest model_update = 4;
+    UnregisterRequest unregister = 5;
+    ForceShutdownRequest force_shutdown = 6;
+  }
+}
