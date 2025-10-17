@@ -10,7 +10,10 @@ import (
 	"github.com/zeyugao/synapse/internal/client"
 )
 
-var version = "dev" // Default value, will be overwritten at compile time
+var (
+	version = "dev"   // Default value, will be overwritten at compile time
+	semver  = "0.0.0" // Default semantic version, override at compile time
+)
 
 func main() {
 	// Get defaults from environment variables
@@ -34,7 +37,7 @@ func main() {
 		return
 	}
 
-	client := client.NewClient(*baseURL, *serverURL, version)
+	client := client.NewClient(*baseURL, *serverURL, version, semver)
 	client.WSAuthKey = *wsAuthKey
 	client.ApiKey = *apiKey
 	defer client.Close()

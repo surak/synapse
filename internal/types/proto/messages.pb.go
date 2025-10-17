@@ -195,6 +195,7 @@ type ClientRegistration struct {
 	ClientId      string                 `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
 	Models        []*ModelInfo           `protobuf:"bytes,2,rep,name=models,proto3" json:"models,omitempty"`
 	Version       string                 `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`
+	Semver        string                 `protobuf:"bytes,4,opt,name=semver,proto3" json:"semver,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -246,6 +247,13 @@ func (x *ClientRegistration) GetModels() []*ModelInfo {
 func (x *ClientRegistration) GetVersion() string {
 	if x != nil {
 		return x.Version
+	}
+	return ""
+}
+
+func (x *ClientRegistration) GetSemver() string {
+	if x != nil {
+		return x.Semver
 	}
 	return ""
 }
@@ -1006,11 +1014,12 @@ const file_internal_types_proto_messages_proto_rawDesc = "" +
 	"\bowned_by\x18\x04 \x01(\tR\aownedBy\"V\n" +
 	"\x0eModelsResponse\x12\x16\n" +
 	"\x06object\x18\x01 \x01(\tR\x06object\x12,\n" +
-	"\x04data\x18\x02 \x03(\v2\x18.synapse.types.ModelInfoR\x04data\"}\n" +
+	"\x04data\x18\x02 \x03(\v2\x18.synapse.types.ModelInfoR\x04data\"\x95\x01\n" +
 	"\x12ClientRegistration\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x120\n" +
 	"\x06models\x18\x02 \x03(\v2\x18.synapse.types.ModelInfoR\x06models\x12\x18\n" +
-	"\aversion\x18\x03 \x01(\tR\aversion\"7\n" +
+	"\aversion\x18\x03 \x01(\tR\aversion\x12\x16\n" +
+	"\x06semver\x18\x04 \x01(\tR\x06semver\"7\n" +
 	"\vHeaderEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x16\n" +
 	"\x06values\x18\x02 \x03(\tR\x06values\"\xcf\x01\n" +

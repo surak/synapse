@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -35,6 +36,8 @@ type Server struct {
 	wsAuthKey                    string
 	clientRequests               map[string]map[string]struct{} // clientID -> set of requestIDs
 	version                      string
+	semver                       string
+	semverMajor                  int
 	clientBinaryPath             string
 	abortOnClientVersionMismatch bool
 	clientMsgPool                sync.Pool
@@ -80,7 +83,12 @@ func (c *Client) loadActive() int64 {
 	return atomic.LoadInt64(&c.activeRequests)
 }
 
-func NewServer(apiAuthKey, wsAuthKey string, version string, clientBinaryPath string, abortOnClientVersionMismatch bool) *Server {
+func NewServer(apiAuthKey, wsAuthKey string, version string, semver string, clientBinaryPath string, abortOnClientVersionMismatch bool) *Server {
+	semverMajor, err := parseSemverMajor(semver)
+	if err != nil {
+		log.Fatalf("invalid server semantic version %q: %v", semver, err)
+	}
+
 	server := &Server{
 		clients:         make(map[string]*Client),
 		modelClients:    make(map[string][]string),
@@ -94,6 +102,8 @@ func NewServer(apiAuthKey, wsAuthKey string, version string, clientBinaryPath st
 			},
 		},
 		version:                      version,
+		semver:                       semver,
+		semverMajor:                  semverMajor,
 		clientBinaryPath:             clientBinaryPath,
 		abortOnClientVersionMismatch: abortOnClientVersionMismatch,
 		modelsCacheDirty:             true,
@@ -126,6 +136,32 @@ func generateRequestID() string {
 	b := make([]byte, 16)
 	cryptoRand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func parseSemverMajor(ver string) (int, error) {
+	trimmed := strings.TrimSpace(ver)
+	if trimmed == "" {
+		return 0, fmt.Errorf("empty semantic version")
+	}
+	if trimmed[0] == 'v' || trimmed[0] == 'V' {
+		trimmed = trimmed[1:]
+	}
+	parts := strings.Split(trimmed, ".")
+	if len(parts) < 2 {
+		return 0, fmt.Errorf("semantic version %q must include major and minor components", ver)
+	}
+	majorComponent := strings.TrimSpace(parts[0])
+	if majorComponent == "" {
+		return 0, fmt.Errorf("semantic version %q has empty major component", ver)
+	}
+	major, err := strconv.Atoi(majorComponent)
+	if err != nil {
+		return 0, fmt.Errorf("invalid major component in semantic version %q: %w", ver, err)
+	}
+	if major < 0 {
+		return 0, fmt.Errorf("semantic version %q has negative major component", ver)
+	}
+	return major, nil
 }
 
 func (s *Server) readClientMessage(conn *websocket.Conn) (*types.ClientMessage, error) {
@@ -195,6 +231,32 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 			s.putClientMessage(initialMsg)
 			return
 		}
+	}
+
+	clientSemver := registration.GetSemver()
+	if clientSemver == "" {
+		log.Printf("Client %s did not provide a semantic version, connection refused", clientID)
+		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4002, "Semantic version required"))
+		conn.Close()
+		s.putClientMessage(initialMsg)
+		return
+	}
+
+	clientSemverMajor, err := parseSemverMajor(clientSemver)
+	if err != nil {
+		log.Printf("Client %s provided invalid semantic version %q: %v", clientID, clientSemver, err)
+		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4003, "Invalid semantic version"))
+		conn.Close()
+		s.putClientMessage(initialMsg)
+		return
+	}
+
+	if clientSemverMajor != s.semverMajor {
+		log.Printf("Client semantic version mismatch (client: %s, server: %s)", clientSemver, s.semver)
+		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4004, fmt.Sprintf("Client major version %d does not match server major version %d", clientSemverMajor, s.semverMajor)))
+		conn.Close()
+		s.putClientMessage(initialMsg)
+		return
 	}
 
 	models := cloneModelInfos(registration.GetModels())

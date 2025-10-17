@@ -46,16 +46,18 @@ type Client struct {
 	shutdownOnce    sync.Once
 	activeRequests  int64 // Atomic counter
 	Version         string
+	Semver          string
 	connClosed      chan struct{} // Channel to signal connection closed
 	msgPool         sync.Pool
 }
 
-func NewClient(baseUrl, serverURL string, version string) *Client {
+func NewClient(baseUrl, serverURL string, version string, semver string) *Client {
 	client := &Client{
 		BaseUrl:         baseUrl,
 		ServerURL:       serverURL,
 		ClientID:        generateClientID(),
 		Version:         version,
+		Semver:          semver,
 		cancelMap:       make(map[string]context.CancelFunc),
 		heartbeatTicker: time.NewTicker(15 * time.Second),
 		syncTicker:      time.NewTicker(30 * time.Second),
@@ -163,6 +165,7 @@ func (c *Client) Connect() error {
 			ClientId: c.ClientID,
 			Models:   cloneModelInfos(c.models),
 			Version:  c.Version,
+			Semver:   c.Semver,
 		},
 	}
 	if err := c.writeProto(registration); err != nil {

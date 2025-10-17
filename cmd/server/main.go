@@ -10,7 +10,10 @@ import (
 	"github.com/zeyugao/synapse/internal/server"
 )
 
-var version = "dev" // Default value, will be overwritten at compile time
+var (
+	version = "dev"   // Default value, will be overwritten at compile time
+	semver  = "0.0.0" // Default semantic version, override at compile time
+)
 
 func main() {
 	// Get the directory where the server binary is located
@@ -39,7 +42,7 @@ func main() {
 		return
 	}
 
-	server := server.NewServer(*apiAuthKey, *wsAuthKey, version, *clientBinary, *abortOnClientVersionMismatch)
+	server := server.NewServer(*apiAuthKey, *wsAuthKey, version, semver, *clientBinary, *abortOnClientVersionMismatch)
 	log.Printf("Starting server on %s:%s", *host, *port)
 	if err := server.Start(*host, *port); err != nil {
 		log.Fatal(err)

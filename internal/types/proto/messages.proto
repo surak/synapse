@@ -20,6 +20,7 @@ message ClientRegistration {
   string client_id = 1;
   repeated ModelInfo models = 2;
   string version = 3;
+  string semver = 4;
 }
 
 message HeaderEntry {

@@ -18,6 +18,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Version Management
 - Version is automatically determined from git: `git rev-parse --short=6 HEAD` + `-dev` suffix if working directory is dirty
 - Both binaries embed version info via build-time `-ldflags`
+- When modifying the client/server communication protocol, bump the semantic version major; use the minor component for backwards-compatible changes.
 
 ## Architecture
 
