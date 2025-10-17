@@ -216,18 +216,34 @@ func (s *Server) handleClientResponses(clientID string, client *Client) {
 }
 
 func (s *Server) handleForwardResponse(resp *types.ForwardResponse) {
-	s.reqMu.Lock()
-	respChan, exists := s.pendingRequests[resp.GetRequestId()]
+	requestID := resp.GetRequestId()
 
-	if exists {
+	s.reqMu.RLock()
+	respChan, exists := s.pendingRequests[requestID]
+	s.reqMu.RUnlock()
+
+	if !exists || respChan == nil {
+		return
+	}
+
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				// Channel may have been closed concurrently; ignore.
+			}
+		}()
 		respChan <- resp
-		kind := resp.GetKind()
-		if (kind == types.ResponseKindStream && resp.GetDone()) || kind == types.ResponseKindNormal {
-			delete(s.pendingRequests, resp.GetRequestId())
+	}()
+
+	kind := resp.GetKind()
+	if (kind == types.ResponseKindStream && resp.GetDone()) || kind == types.ResponseKindNormal {
+		s.reqMu.Lock()
+		if ch, ok := s.pendingRequests[requestID]; ok && ch == respChan {
+			delete(s.pendingRequests, requestID)
 			close(respChan)
 		}
+		s.reqMu.Unlock()
 	}
-	s.reqMu.Unlock()
 }
 
 func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
