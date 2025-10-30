@@ -26,7 +26,6 @@ func main() {
 
 	host := flag.String("host", "localhost", "Server host")
 	port := flag.String("port", "8080", "Server port")
-	apiAuthKey := flag.String("api-auth-key", "", "API authentication key")
 	wsAuthKey := flag.String("ws-auth-key", "", "WebSocket registration authentication key")
 	printVersion := flag.Bool("version", false, "Print version number")
 	clientBinary := flag.String("client-binary", defaultClientPath, "Client binary file path")
@@ -42,7 +41,7 @@ func main() {
 		return
 	}
 
-	server := server.NewServer(*apiAuthKey, *wsAuthKey, version, semver, *clientBinary, *abortOnClientVersionMismatch)
+	server := server.NewServer(*wsAuthKey, version, semver, *clientBinary, *abortOnClientVersionMismatch)
 	log.Printf("Starting server on %s:%s", *host, *port)
 	if err := server.Start(*host, *port); err != nil {
 		log.Fatal(err)

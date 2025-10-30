@@ -32,7 +32,6 @@ type Server struct {
 	upgrader                     websocket.Upgrader
 	pendingRequests              map[string]chan *types.ForwardResponse
 	reqMu                        sync.RWMutex
-	apiAuthKey                   string
 	wsAuthKey                    string
 	clientRequests               map[string]map[string]struct{} // clientID -> set of requestIDs
 	version                      string
@@ -45,6 +44,7 @@ type Server struct {
 	pongFrame                    []byte
 	modelsCache                  []byte
 	modelsCacheDirty             bool
+	httpClient                   *http.Client
 }
 
 type Client struct {
@@ -83,7 +83,7 @@ func (c *Client) loadActive() int64 {
 	return atomic.LoadInt64(&c.activeRequests)
 }
 
-func NewServer(apiAuthKey, wsAuthKey string, version string, semver string, clientBinaryPath string, abortOnClientVersionMismatch bool) *Server {
+func NewServer(wsAuthKey string, version string, semver string, clientBinaryPath string, abortOnClientVersionMismatch bool) *Server {
 	semverMajor, err := parseSemverMajor(semver)
 	if err != nil {
 		log.Fatalf("invalid server semantic version %q: %v", semver, err)
@@ -94,7 +94,6 @@ func NewServer(apiAuthKey, wsAuthKey string, version string, semver string, clie
 		modelClients:    make(map[string][]string),
 		pendingRequests: make(map[string]chan *types.ForwardResponse),
 		clientRequests:  make(map[string]map[string]struct{}),
-		apiAuthKey:      apiAuthKey,
 		wsAuthKey:       wsAuthKey,
 		upgrader: websocket.Upgrader{
 			CheckOrigin: func(r *http.Request) bool {
@@ -107,6 +106,7 @@ func NewServer(apiAuthKey, wsAuthKey string, version string, semver string, clie
 		clientBinaryPath:             clientBinaryPath,
 		abortOnClientVersionMismatch: abortOnClientVersionMismatch,
 		modelsCacheDirty:             true,
+		httpClient:                   &http.Client{},
 	}
 
 	server.clientMsgPool = sync.Pool{
@@ -178,12 +178,46 @@ func (s *Server) readClientMessage(conn *websocket.Conn) (*types.ClientMessage, 
 	return msg, nil
 }
 
+func (s *Server) validateToken(token string) bool {
+	req, err := http.NewRequest("GET", "https://codebase.helmholtz.cloud/api/v4/user", nil)
+	if err != nil {
+		log.Printf("Failed to create token validation request: %v", err)
+		return false
+	}
+	req.Header.Add("Authorization", "Bearer "+token)
+	resp, err := s.httpClient.Do(req)
+	if err != nil {
+		log.Printf("Failed to send token validation request: %v", err)
+		return false
+	}
+	defer resp.Body.Close()
+	return resp.StatusCode == http.StatusOK
+}
+
+func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) bool {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		http.Error(w, "You must provide a valid API key. Obtain one from http://helmholtz.cloud", http.StatusUnauthorized)
+		return false
+	}
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	if !s.validateToken(token) {
+		http.Error(w, "You must provide a valid API key. Obtain one from http://helmholtz.cloud", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	clientIP := r.RemoteAddr
 	if forwardedFor := r.Header.Get("X-Forwarded-For"); forwardedFor != "" {
 		clientIP = forwardedFor
 	} else if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
 		clientIP = realIP
+	}
+
+	if !s.authenticate(w, r) {
+		return
 	}
 
 	// Check WebSocket authentication
@@ -378,13 +412,8 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
-	// Check API authentication
-	if s.apiAuthKey != "" {
-		authHeader := r.Header.Get("Authorization")
-		if authHeader != "Bearer "+s.apiAuthKey {
-			http.Error(w, "Unauthorized", http.StatusUnauthorized)
-			return
-		}
+	if !s.authenticate(w, r) {
+		return
 	}
 
 	path := r.URL.Path
