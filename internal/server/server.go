@@ -194,30 +194,12 @@ func (s *Server) validateToken(token string) bool {
 	return resp.StatusCode == http.StatusOK
 }
 
-func (s *Server) authenticate(w http.ResponseWriter, r *http.Request) bool {
-	authHeader := r.Header.Get("Authorization")
-	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
-		http.Error(w, "You must provide a valid API key. Obtain one from http://helmholtz.cloud", http.StatusUnauthorized)
-		return false
-	}
-	token := strings.TrimPrefix(authHeader, "Bearer ")
-	if !s.validateToken(token) {
-		http.Error(w, "You must provide a valid API key. Obtain one from http://helmholtz.cloud", http.StatusUnauthorized)
-		return false
-	}
-	return true
-}
-
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	clientIP := r.RemoteAddr
 	if forwardedFor := r.Header.Get("X-Forwarded-For"); forwardedFor != "" {
 		clientIP = forwardedFor
 	} else if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
 		clientIP = realIP
-	}
-
-	if !s.authenticate(w, r) {
-		return
 	}
 
 	// Check WebSocket authentication
@@ -412,7 +394,14 @@ func (s *Server) handleModels(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
-	if !s.authenticate(w, r) {
+	authHeader := r.Header.Get("Authorization")
+	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		http.Error(w, "You must provide a valid API key. Obtain one from http://helmholtz.cloud", http.StatusUnauthorized)
+		return
+	}
+	token := strings.TrimPrefix(authHeader, "Bearer ")
+	if !s.validateToken(token) {
+		http.Error(w, "You must provide a valid API key. Obtain one from http://helmholtz.cloud", http.StatusUnauthorized)
 		return
 	}
 
