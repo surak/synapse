@@ -179,10 +179,18 @@ func (s *Server) readClientMessage(conn *websocket.Conn) (*types.ClientMessage, 
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
+	clientIP := r.RemoteAddr
+	if forwardedFor := r.Header.Get("X-Forwarded-For"); forwardedFor != "" {
+		clientIP = forwardedFor
+	} else if realIP := r.Header.Get("X-Real-IP"); realIP != "" {
+		clientIP = realIP
+	}
+
 	// Check WebSocket authentication
 	if s.wsAuthKey != "" {
 		authKey := r.URL.Query().Get("ws_auth_key")
 		if authKey != s.wsAuthKey {
+			log.Printf("WebSocket authentication failed from %s", clientIP)
 			http.Error(w, "Unauthorized", http.StatusUnauthorized)
 			return
 		}
@@ -190,21 +198,21 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := s.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		log.Printf("WebSocket upgrade failed: %v", err)
+		log.Printf("WebSocket upgrade failed from %s: %v", clientIP, err)
 		http.Error(w, "Could not upgrade connection", http.StatusInternalServerError)
 		return
 	}
 
 	initialMsg, err := s.readClientMessage(conn)
 	if err != nil {
-		log.Printf("Failed to read registration information: %v", err)
+		log.Printf("Failed to read registration information from %s: %v", clientIP, err)
 		conn.Close()
 		return
 	}
 
 	registration := initialMsg.GetRegistration()
 	if registration == nil {
-		log.Printf("Client did not send registration as first message, connection refused")
+		log.Printf("Client from %s did not send registration as first message, connection refused", clientIP)
 		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4000, "Registration required"))
 		conn.Close()
 		s.putClientMessage(initialMsg)
@@ -215,7 +223,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	clientID := registration.GetClientId()
 	version := registration.GetVersion()
 	if version == "" {
-		log.Printf("Client %s did not provide a version number, connection refused", clientID)
+		log.Printf("Client %s from %s did not provide a version number, connection refused", clientID, clientIP)
 		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4000, "Version required"))
 		conn.Close()
 		s.putClientMessage(initialMsg)
@@ -223,9 +231,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if version != s.version {
-		log.Printf("Client version mismatch (client: %s, server: %s)", version, s.version)
+		log.Printf("Client version mismatch (client: %s, server: %s) from %s", version, s.version, clientIP)
 		if s.abortOnClientVersionMismatch {
-			log.Printf("Aborting server because client version mismatch")
+			log.Printf("Aborting server because client version mismatch from %s", clientIP)
 			conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4001, fmt.Sprintf("Client version %s does not match server version %s", version, s.version)))
 			conn.Close()
 			s.putClientMessage(initialMsg)
@@ -235,7 +243,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	clientSemver := registration.GetSemver()
 	if clientSemver == "" {
-		log.Printf("Client %s did not provide a semantic version, connection refused", clientID)
+		log.Printf("Client %s from %s did not provide a semantic version, connection refused", clientID, clientIP)
 		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4002, "Semantic version required"))
 		conn.Close()
 		s.putClientMessage(initialMsg)
@@ -244,7 +252,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 
 	clientSemverMajor, err := parseSemverMajor(clientSemver)
 	if err != nil {
-		log.Printf("Client %s provided invalid semantic version %q: %v", clientID, clientSemver, err)
+		log.Printf("Client %s from %s provided invalid semantic version %q: %v", clientID, clientIP, clientSemver, err)
 		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4003, "Invalid semantic version"))
 		conn.Close()
 		s.putClientMessage(initialMsg)
@@ -252,7 +260,7 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if clientSemverMajor != s.semverMajor {
-		log.Printf("Client semantic version mismatch (client: %s, server: %s)", clientSemver, s.semver)
+		log.Printf("Client semantic version mismatch (client: %s, server: %s) from %s", clientSemver, s.semver, clientIP)
 		conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4004, fmt.Sprintf("Client major version %d does not match server major version %d", clientSemverMajor, s.semverMajor)))
 		conn.Close()
 		s.putClientMessage(initialMsg)
