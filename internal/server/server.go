@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,22 +27,26 @@ import (
 const responseChannelBuffer = 8
 
 type Server struct {
-	clients          map[string]*Client
-	modelClients     map[string][]string // model -> []clientID
-	mu               sync.RWMutex
-	upgrader         websocket.Upgrader
-	pendingRequests  map[string]chan *types.ForwardResponse
-	reqMu            sync.RWMutex
-	apiAuthKey       string
-	wsAuthKey        string
-	clientRequests   map[string]map[string]struct{} // clientID -> set of requestIDs
-	version          string
-	clientBinaryPath string
-	clientMsgPool    sync.Pool
-	serverMsgPool    sync.Pool
-	pongFrame        []byte
-	modelsCache      []byte
-	modelsCacheDirty bool
+	clients                      map[string]*Client
+	modelClients                 map[string][]string // model -> []clientID
+	mu                           sync.RWMutex
+	upgrader                     websocket.Upgrader
+	pendingRequests              map[string]chan *types.ForwardResponse
+	reqMu                        sync.RWMutex
+	apiAuthKey                   string
+	wsAuthKey                    string
+	clientRequests               map[string]map[string]struct{} // clientID -> set of requestIDs
+	version                      string
+	semver                       string
+	semverMajor                  int
+	clientBinaryPath             string
+	abortOnClientVersionMismatch bool
+	clientMsgPool                sync.Pool
+	serverMsgPool                sync.Pool
+	pongFrame                    []byte
+	modelsCache                  []byte
+	modelsCacheDirty             bool
+	httpClient                   *http.Client
 }
 
 type Client struct {
@@ -117,7 +122,12 @@ func (c *Client) processingForModel(modelID string) float64 {
 	return c.modelAverages[modelID]
 }
 
-func NewServer(apiAuthKey, wsAuthKey string, version string, clientBinaryPath string) *Server {
+func NewServer(apiAuthKey, wsAuthKey string, version string, semver string, clientBinaryPath string, abortOnClientVersionMismatch bool) *Server {
+	semverMajor, err := parseSemverMajor(semver)
+	if err != nil {
+		log.Fatalf("invalid server semantic version %q: %v", semver, err)
+	}
+
 	server := &Server{
 		clients:         make(map[string]*Client),
 		modelClients:    make(map[string][]string),
@@ -130,9 +140,13 @@ func NewServer(apiAuthKey, wsAuthKey string, version string, clientBinaryPath st
 				return true
 			},
 		},
-		version:          version,
-		clientBinaryPath: clientBinaryPath,
-		modelsCacheDirty: true,
+		version:                      version,
+		semver:                       semver,
+		semverMajor:                  semverMajor,
+		clientBinaryPath:             clientBinaryPath,
+		abortOnClientVersionMismatch: abortOnClientVersionMismatch,
+		modelsCacheDirty:             true,
+		httpClient:                   &http.Client{},
 	}
 
 	server.clientMsgPool = sync.Pool{
@@ -162,6 +176,32 @@ func generateRequestID() string {
 	b := make([]byte, 16)
 	cryptoRand.Read(b)
 	return hex.EncodeToString(b)
+}
+
+func parseSemverMajor(ver string) (int, error) {
+	trimmed := strings.TrimSpace(ver)
+	if trimmed == "" {
+		return 0, fmt.Errorf("empty semantic version")
+	}
+	if trimmed[0] == 'v' || trimmed[0] == 'V' {
+		trimmed = trimmed[1:]
+	}
+	parts := strings.Split(trimmed, ".")
+	if len(parts) < 2 {
+		return 0, fmt.Errorf("semantic version %q must include major and minor components", ver)
+	}
+	majorComponent := strings.TrimSpace(parts[0])
+	if majorComponent == "" {
+		return 0, fmt.Errorf("semantic version %q has empty major component", ver)
+	}
+	major, err := strconv.Atoi(majorComponent)
+	if err != nil {
+		return 0, fmt.Errorf("invalid major component in semantic version %q: %w", ver, err)
+	}
+	if major < 0 {
+		return 0, fmt.Errorf("semantic version %q has negative major component", ver)
+	}
+	return major, nil
 }
 
 func (s *Server) readClientMessage(conn *websocket.Conn) (*types.ClientMessage, error) {

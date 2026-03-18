@@ -12,6 +12,7 @@ import (
 
 var (
 	version = "dev" // Default value, will be overwritten at compile time
+	semver  = "0.0.0" // Default semantic version, override at compile time
 )
 
 func main() {
@@ -25,10 +26,11 @@ func main() {
 
 	host := flag.String("host", "localhost", "Server host")
 	port := flag.String("port", "8080", "Server port")
-	apiAuthKey := flag.String("api-auth-key", "", "API authentication key")
+	apiAuthKey := flag.String("api-auth-key", "", "API authentication key (Bearer Token)")
 	wsAuthKey := flag.String("ws-auth-key", "", "WebSocket registration authentication key")
 	printVersion := flag.Bool("version", false, "Print version number")
 	clientBinary := flag.String("client-binary", defaultClientPath, "Client binary file path")
+	abortOnClientVersionMismatch := flag.Bool("abort-on-client-version-mismatch", false, "Abort the server if the client version is not the same as the server version")
 	flag.Parse()
 
 	if _, err := os.Stat(*clientBinary); os.IsNotExist(err) {
@@ -40,8 +42,7 @@ func main() {
 		return
 	}
 
-	log.Printf("Synapse Server Version: %s", version)
-	server := server.NewServer(*apiAuthKey, *wsAuthKey, version, *clientBinary)
+	server := server.NewServer(*apiAuthKey, *wsAuthKey, version, semver, *clientBinary, *abortOnClientVersionMismatch)
 	log.Printf("Starting server on %s:%s", *host, *port)
 	if err := server.Start(*host, *port); err != nil {
 		log.Fatal(err)
