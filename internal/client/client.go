@@ -30,8 +30,9 @@ import (
 )
 
 const (
-	processingEMAAlpha   = 0.2
-	streamReadBufferSize = 32 * 1024
+	processingEMAAlpha             = 0.2
+	streamReadBufferSize           = 32 * 1024
+	modelSyncFailureClearThreshold = 3
 )
 
 type requestTiming struct {
@@ -40,29 +41,30 @@ type requestTiming struct {
 }
 
 type Client struct {
-	BaseUrl         string
-	ServerURL       string
-	ClientID        string
-	WSAuthKey       string
-	ApiKey          string
-	models          []*types.ModelInfo
-	conn            *websocket.Conn
-	mu              sync.Mutex
-	reconnMu        sync.Mutex
-	reconnecting    bool
-	closing         bool
-	heartbeatTicker *time.Ticker
-	cancelMap       map[string]context.CancelFunc
-	syncTicker      *time.Ticker
-	shutdownSignal  chan struct{}
-	shutdownOnce    sync.Once
-	activeRequests  int64 // Atomic counter
-	Version         string
-	connClosed      chan struct{} // Channel to signal connection closed
-	msgPool         sync.Pool
-	metricsMu       sync.Mutex
-	requestTimings  map[string]requestTiming
-	modelProcessMs  map[string]float64
+	BaseUrl           string
+	ServerURL         string
+	ClientID          string
+	WSAuthKey         string
+	ApiKey            string
+	models            []*types.ModelInfo
+	conn              *websocket.Conn
+	mu                sync.Mutex
+	reconnMu          sync.Mutex
+	reconnecting      bool
+	closing           bool
+	heartbeatTicker   *time.Ticker
+	cancelMap         map[string]context.CancelFunc
+	syncTicker        *time.Ticker
+	shutdownSignal    chan struct{}
+	shutdownOnce      sync.Once
+	activeRequests    int64 // Atomic counter
+	Version           string
+	connClosed        chan struct{} // Channel to signal connection closed
+	msgPool           sync.Pool
+	metricsMu         sync.Mutex
+	requestTimings    map[string]requestTiming
+	modelProcessMs    map[string]float64
+	modelSyncFailures int
 }
 
 func NewClient(baseUrl, serverURL string, version string) *Client {
@@ -198,7 +200,9 @@ func decodeJSONObject(raw []byte) (map[string]any, error) {
 func (c *Client) Connect() error {
 	models, err := c.fetchModels(false)
 	if err != nil {
-		log.Printf("Failed to fetch models during initial connection, using cached model list: %v", err)
+		log.Printf("Failed to fetch models during initial connection, registering empty model list: %v", err)
+	} else {
+		c.modelSyncFailures = 0
 	}
 	if models == nil {
 		models = []*types.ModelInfo{}
@@ -254,6 +258,10 @@ func (c *Client) Connect() error {
 	return nil
 }
 
+func (c *Client) WaitForConnectionClosed() {
+	<-c.connClosed
+}
+
 // heartbeatLoop replaces startHeartbeat and runs continuously
 func (c *Client) heartbeatLoop() {
 	for range c.heartbeatTicker.C {
@@ -307,16 +315,28 @@ func (c *Client) syncModels() {
 
 	newModels, err := c.fetchModels(true)
 	if err != nil {
-		if c.modelsEqual(nil) {
+		c.modelSyncFailures++
+		if c.modelSyncFailures < modelSyncFailureClearThreshold {
+			log.Printf("Failed to fetch model update (%d/%d), keeping current model list: %v", c.modelSyncFailures, modelSyncFailureClearThreshold, err)
 			return
 		}
-		log.Printf("Reporting empty model list due to upstream failure")
-	} else if c.modelsEqual(newModels) {
+		if c.modelsEqual(nil) {
+			log.Printf("Failed to fetch model update and model list is already empty: %v", err)
+			return
+		}
+		log.Printf("Clearing model list after %d consecutive upstream model fetch failures: %v", c.modelSyncFailures, err)
+		c.models = nil
+		c.notifyModelUpdate(nil)
+		return
+	}
+
+	c.modelSyncFailures = 0
+	if c.modelsEqual(newModels) {
 		return
 	}
 
 	if len(newModels) == 0 {
-		log.Printf("Cleared model list due to upstream failure")
+		log.Printf("Cleared model list because upstream reported no models")
 	} else {
 		log.Printf("Detected model changes, triggering update")
 		log.Printf("Updated model list (%d models):", len(newModels))
@@ -537,7 +557,6 @@ func (c *Client) signalConnectionClosed() {
 		// Channel already closed
 	default:
 		close(c.connClosed)
-		go c.reconnect() // Trigger reconnection
 	}
 }
 
@@ -755,48 +774,6 @@ func generateClientID() string {
 	return hex.EncodeToString(b)
 }
 
-func (c *Client) reconnect() {
-	c.mu.Lock()
-	if c.closing {
-		c.mu.Unlock()
-		return
-	}
-	c.mu.Unlock()
-
-	c.reconnMu.Lock()
-	if c.reconnecting {
-		c.reconnMu.Unlock()
-		return
-	}
-	c.reconnecting = true
-	c.reconnMu.Unlock()
-	defer c.setReconnecting(false)
-
-	c.mu.Lock()
-	if c.conn != nil {
-		c.conn.Close()
-		c.conn = nil
-	}
-	c.mu.Unlock()
-
-	retryWait := 1 * time.Second
-	maxRetryWait := 30 * time.Second
-
-	for {
-		log.Printf("Attempting to reconnect...")
-		if err := c.Connect(); err == nil {
-			log.Printf("Reconnected successfully")
-			return
-		}
-
-		if retryWait < maxRetryWait {
-			retryWait *= 2
-		}
-		log.Printf("Reconnection failed, retrying in %v...", retryWait)
-		time.Sleep(retryWait)
-	}
-}
-
 func (c *Client) Close() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -806,6 +783,19 @@ func (c *Client) Close() {
 	}
 	c.heartbeatTicker.Stop()
 	c.syncTicker.Stop()
+}
+
+func (c *Client) CloseConnection() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.conn == nil {
+		return nil
+	}
+
+	err := c.conn.Close()
+	c.conn = nil
+	return err
 }
 
 func (c *Client) modelsEqual(newModels []*types.ModelInfo) bool {

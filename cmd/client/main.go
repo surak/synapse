@@ -53,6 +53,11 @@ func main() {
 			continue
 		}
 
-		select {} // Block the main thread until the connection is broken
+		client.WaitForConnectionClosed()
+		if err := client.CloseConnection(); err != nil {
+			log.Printf("Failed to close disconnected websocket: %v", err)
+		}
+		log.Printf("Connection closed, retrying in 5 seconds...")
+		time.Sleep(5 * time.Second)
 	}
 }
