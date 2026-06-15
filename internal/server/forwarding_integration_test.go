@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -233,6 +234,62 @@ func TestForwardingIntegrationClosesStreamWhenEOFArrivesAfterFinalChunk(t *testi
 	expected := backend.specialStreamBody(delayedEOFPrompt)
 	if !bytes.Equal(body, expected) {
 		t.Fatalf("delayed EOF stream mismatch:\n got: %q\nwant: %q", string(body), string(expected))
+	}
+}
+
+func TestForwardingIntegrationForwardsMultipartAudioTranscription(t *testing.T) {
+	backend := newFakeOpenAIBackend(t)
+	defer backend.Close()
+
+	httpBaseURL, serverAPIKey, shutdown := startConnectedSynapseClient(t, backend)
+	defer shutdown()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	if err := writer.WriteField("model", backend.modelID); err != nil {
+		t.Fatalf("failed to write model field: %v", err)
+	}
+	filePart, err := writer.CreateFormFile("file", "sample.wav")
+	if err != nil {
+		t.Fatalf("failed to create file field: %v", err)
+	}
+	if _, err := filePart.Write([]byte("fake audio bytes")); err != nil {
+		t.Fatalf("failed to write file field: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatalf("failed to close multipart writer: %v", err)
+	}
+
+	req, err := http.NewRequest(http.MethodPost, httpBaseURL+"/v1/audio/transcriptions", bytes.NewReader(body.Bytes()))
+	if err != nil {
+		t.Fatalf("failed to create transcription request: %v", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+serverAPIKey)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatalf("transcription request failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read transcription response: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("transcription request failed: status=%d body=%q", resp.StatusCode, string(respBody))
+	}
+
+	var parsed struct {
+		Text string `json:"text"`
+	}
+	if err := json.Unmarshal(respBody, &parsed); err != nil {
+		t.Fatalf("failed to decode transcription response %q: %v", string(respBody), err)
+	}
+	if parsed.Text != "transcribed:sample.wav" {
+		t.Fatalf("unexpected transcription text: got %q", parsed.Text)
 	}
 }
 
@@ -511,6 +568,7 @@ func newFakeOpenAIBackendWithOptions(t *testing.T, modelID, apiKey, responsePref
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/models", backend.handleModels)
 	mux.HandleFunc("/v1/chat/completions", backend.handleChatCompletion)
+	mux.HandleFunc("/v1/audio/transcriptions", backend.handleAudioTranscription)
 
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -622,6 +680,39 @@ func (f *fakeOpenAIBackend) handleChatCompletion(w http.ResponseWriter, r *http.
 		"choices": []map[string]any{{"index": 0, "message": map[string]any{"role": "assistant", "content": responseText}, "finish_reason": "stop"}},
 	}
 
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(resp)
+}
+
+func (f *fakeOpenAIBackend) handleAudioTranscription(w http.ResponseWriter, r *http.Request) {
+	if !f.authorized(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
+		http.Error(w, "invalid multipart body", http.StatusBadRequest)
+		return
+	}
+	if got := r.FormValue("model"); got != f.modelID {
+		http.Error(w, fmt.Sprintf("unknown model %q", got), http.StatusNotFound)
+		return
+	}
+
+	file, header, err := r.FormFile("file")
+	if err != nil {
+		http.Error(w, "missing file", http.StatusBadRequest)
+		return
+	}
+	defer file.Close()
+	if _, err := io.ReadAll(file); err != nil {
+		http.Error(w, "failed to read file", http.StatusBadRequest)
+		return
+	}
+
+	resp := map[string]any{
+		"text": "transcribed:" + header.Filename,
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(resp)
 }

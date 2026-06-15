@@ -9,6 +9,8 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"mime"
+	"mime/multipart"
 	"net"
 	"net/http"
 	"os"
@@ -492,10 +494,8 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = io.NopCloser(bytes.NewBuffer(body))
 
-	var modelReq struct {
-		Model string `json:"model"`
-	}
-	if err := json.Unmarshal(body, &modelReq); err != nil {
+	model, err := extractRequestModel(body, r.Header)
+	if err != nil {
 		http.Error(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -512,7 +512,7 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 	// Build forward request
 	req := &types.ForwardRequest{
 		RequestId: requestID,
-		Model:     modelReq.Model,
+		Model:     model,
 		Method:    r.Method,
 		Path:      path,
 		Query:     r.URL.RawQuery,
@@ -693,6 +693,51 @@ func (s *Server) handleAPIRequest(w http.ResponseWriter, r *http.Request) {
 		s.putServerMessage(closeReq)
 		return
 	}
+}
+
+func extractRequestModel(body []byte, header http.Header) (string, error) {
+	contentType := header.Get("Content-Type")
+	if contentType != "" {
+		mediaType, params, err := mime.ParseMediaType(contentType)
+		if err != nil {
+			return "", err
+		}
+		if mediaType == "multipart/form-data" {
+			boundary := params["boundary"]
+			if boundary == "" {
+				return "", fmt.Errorf("missing multipart boundary")
+			}
+
+			reader := multipart.NewReader(bytes.NewReader(body), boundary)
+			for {
+				part, err := reader.NextPart()
+				if err == io.EOF {
+					return "", nil
+				}
+				if err != nil {
+					return "", err
+				}
+				if part.FormName() != "model" {
+					part.Close()
+					continue
+				}
+				value, err := io.ReadAll(part)
+				part.Close()
+				if err != nil {
+					return "", err
+				}
+				return string(value), nil
+			}
+		}
+	}
+
+	var modelReq struct {
+		Model string `json:"model"`
+	}
+	if err := json.Unmarshal(body, &modelReq); err != nil {
+		return "", err
+	}
+	return modelReq.Model, nil
 }
 
 func (s *Server) unregisterClient(clientKey string) {
