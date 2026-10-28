@@ -802,25 +802,23 @@ func (c *Client) modelsEqual(newModels []*types.ModelInfo) bool {
 	if len(c.models) != len(newModels) {
 		return false
 	}
-
-	oldMap := make(map[string]struct{})
+	old := make(map[string]*types.ModelInfo)
 	for _, m := range c.models {
-		if m == nil {
-			continue
+		if m != nil {
+			old[m.GetId()] = m
 		}
-		oldMap[m.GetId()] = struct{}{}
 	}
-
 	for _, m := range newModels {
 		if m == nil {
 			continue
 		}
-		if _, ok := oldMap[m.GetId()]; !ok {
+		previous, ok := old[m.GetId()]
+		if !ok || !proto.Equal(previous, m) {
 			return false
 		}
-		delete(oldMap, m.GetId())
+		delete(old, m.GetId())
 	}
-	return len(oldMap) == 0
+	return len(old) == 0
 }
 
 func (c *Client) notifyModelUpdate(models []*types.ModelInfo) {
