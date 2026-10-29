@@ -2,12 +2,14 @@ package client
 
 import (
 	"bytes"
+	"fmt"
 	"github.com/gorilla/websocket"
 	"github.com/zeyugao/synapse/internal/types"
 	"google.golang.org/protobuf/proto"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -61,9 +63,11 @@ func TestMetadataOnlyChangesTriggerModelUpdate(t *testing.T) {
 }
 
 func TestSyncModelsForwardsMetadataChangesWithoutReconnect(t *testing.T) {
+	var polls atomic.Int64
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"data":[{"id":"m","root":"new","max_model_len":1048576,"capabilities":{"vision":true}}]}`))
+		n := polls.Add(1)
+		fmt.Fprintf(w, `{"data":[{"id":"m","root":"new","max_model_len":1048576,"capabilities":{"vision":true},"created":%d,"permission":[{"id":"p%d","created":%d}]}]}`, n, n, n)
 	}))
 	defer upstream.Close()
 	messages := make(chan *types.ClientMessage, 4)
@@ -74,11 +78,17 @@ func TestSyncModelsForwardsMetadataChangesWithoutReconnect(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer conn.Close()
-	old, err := decodeModelInfo([]byte(`{"id":"m","root":"old","max_model_len":262144,"capabilities":{"vision":false}}`))
+	old, err := decodeModelInfo([]byte(`{"id":"m","root":"old","max_model_len":262144,"capabilities":{"vision":false},"created":0,"permission":[{"id":"p0","created":0}]}`))
 	if err != nil {
 		t.Fatal(err)
 	}
 	c := &Client{BaseUrl: upstream.URL, models: []*types.ModelInfo{old}, conn: conn}
+	c.syncModels()
+	select {
+	case msg := <-messages:
+		t.Fatalf("metadata must settle for one poll before notification: %v", msg)
+	default:
+	}
 	c.syncModels()
 	select {
 	case msg := <-messages:
@@ -90,7 +100,7 @@ func TestSyncModelsForwardsMetadataChangesWithoutReconnect(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		want, _ := decodeJSONObject([]byte(`{"id":"m","root":"new","max_model_len":1048576,"capabilities":{"vision":true}}`))
+		want, _ := decodeJSONObject([]byte(`{"id":"m","root":"new","max_model_len":1048576,"capabilities":{"vision":true},"created":2,"permission":[{"id":"p2","created":2}]}`))
 		if !reflect.DeepEqual(want, payload) {
 			t.Fatalf("metadata changed: %#v", payload)
 		}

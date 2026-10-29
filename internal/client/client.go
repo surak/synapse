@@ -41,30 +41,32 @@ type requestTiming struct {
 }
 
 type Client struct {
-	BaseUrl           string
-	ServerURL         string
-	ClientID          string
-	WSAuthKey         string
-	ApiKey            string
-	models            []*types.ModelInfo
-	conn              *websocket.Conn
-	mu                sync.Mutex
-	reconnMu          sync.Mutex
-	reconnecting      bool
-	closing           bool
-	heartbeatTicker   *time.Ticker
-	cancelMap         map[string]context.CancelFunc
-	syncTicker        *time.Ticker
-	shutdownSignal    chan struct{}
-	shutdownOnce      sync.Once
-	activeRequests    int64 // Atomic counter
-	Version           string
-	connClosed        chan struct{} // Channel to signal connection closed
-	msgPool           sync.Pool
-	metricsMu         sync.Mutex
-	requestTimings    map[string]requestTiming
-	modelProcessMs    map[string]float64
-	modelSyncFailures int
+	BaseUrl            string
+	ServerURL          string
+	ClientID           string
+	WSAuthKey          string
+	ApiKey             string
+	models             []*types.ModelInfo
+	conn               *websocket.Conn
+	mu                 sync.Mutex
+	reconnMu           sync.Mutex
+	reconnecting       bool
+	closing            bool
+	heartbeatTicker    *time.Ticker
+	cancelMap          map[string]context.CancelFunc
+	syncTicker         *time.Ticker
+	shutdownSignal     chan struct{}
+	shutdownOnce       sync.Once
+	activeRequests     int64 // Atomic counter
+	Version            string
+	connClosed         chan struct{} // Channel to signal connection closed
+	msgPool            sync.Pool
+	metricsMu          sync.Mutex
+	requestTimings     map[string]requestTiming
+	modelProcessMs     map[string]float64
+	modelSyncFailures  int
+	previousModels     []*types.ModelInfo
+	suppressedMetadata map[string]bool
 }
 
 func NewClient(baseUrl, serverURL string, version string) *Client {
@@ -208,6 +210,8 @@ func (c *Client) Connect() error {
 		models = []*types.ModelInfo{}
 	}
 	c.models = models
+	c.previousModels = cloneModelInfos(models)
+	c.suppressedMetadata = nil
 
 	// Use the configured server URL directly
 	wsURL := c.ServerURL
@@ -326,12 +330,14 @@ func (c *Client) syncModels() {
 		}
 		log.Printf("Clearing model list after %d consecutive upstream model fetch failures: %v", c.modelSyncFailures, err)
 		c.models = nil
+		c.previousModels = nil
+		c.suppressedMetadata = nil
 		c.notifyModelUpdate(nil)
 		return
 	}
 
 	c.modelSyncFailures = 0
-	if c.modelsEqual(newModels) {
+	if !c.metadataChanged(newModels) {
 		return
 	}
 
